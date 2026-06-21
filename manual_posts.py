@@ -13,6 +13,7 @@ from telegram.ext import (
 from config import ADMIN_USER_IDS
 from conversation_states import AWAIT_DRAFT_CAPTION
 from amazon_scraper import BrowserManager
+from amazon_shortener import shorten_amazon_url
 from product_fetcher import fetch_product, resolve_display_url
 from config import AMAZON_DOMAIN, LAST_PUBLISHED_LOOKBACK
 from database import Database
@@ -143,6 +144,10 @@ async def prepare_draft_from_input(
             coupon_enabled=coupon_enabled,
         )
         display_url = resolve_display_url(product, clean_url)
+        # Try to shorten the URL using Amazon SiteStripe
+        short_url = await shorten_amazon_url(display_url, db)
+        if short_url:
+            display_url = short_url
         screenshot_path = product["screenshot"]
         temp_files.append(screenshot_path)
 

@@ -8,6 +8,7 @@ from telegram.ext import ApplicationBuilder, filters as tg_filters
 
 from admin_dashboard import build_admin_handlers, refresh_runtime_config
 from amazon_scraper import BrowserManager
+from amazon_shortener import shorten_amazon_url
 from creators_api import init_creators_client, shutdown_creators_client
 from product_fetcher import fetch_product, resolve_display_url
 from config import (
@@ -104,6 +105,10 @@ async def process_single_url(
             coupon_enabled=coupon_enabled,
         )
         display_url = resolve_display_url(product, clean_url)
+        # Try to shorten the URL using Amazon SiteStripe
+        short_url = await shorten_amazon_url(display_url, db)
+        if short_url:
+            display_url = short_url
         temp_files.append(product["screenshot"])
         logger.info(
             "SCRAPE SUCCESS: %r %r coupon=%r",

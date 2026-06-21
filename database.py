@@ -136,6 +136,16 @@ class Database:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shortened_links (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    affiliate_url TEXT NOT NULL UNIQUE,
+                    short_url TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
 
     def seed_from_env(self, source_channel_id: int, destination_channel_id: int) -> None:
@@ -543,5 +553,32 @@ class Database:
                 WHERE asin = ?
                 """,
                 (last_price, now, asin.upper()),
+            )
+            conn.commit()
+
+    # --- Amazon SiteStripe URL Shortener cache ---
+
+    def get_shortened_link(self, affiliate_url: str) -> str | None:
+        """Get cached short URL for affiliate URL."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT short_url FROM shortened_links WHERE affiliate_url = ?",
+                (affiliate_url,),
+            ).fetchone()
+        return row["short_url"] if row else None
+
+    def save_shortened_link(self, affiliate_url: str, short_url: str) -> None:
+        """Save or update shortened link for affiliate URL."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO shortened_links (affiliate_url, short_url, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(affiliate_url) DO UPDATE SET
+                    short_url = excluded.short_url,
+                    created_at = excluded.created_at
+                """,
+                (affiliate_url, short_url, now),
             )
             conn.commit()

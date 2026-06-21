@@ -103,3 +103,15 @@ PRICE_SELECTORS = [
     "#priceblock_dealprice",
     "#priceblock_saleprice",
 ]
+
+# Amazon SiteStripe URL Shortener
+AMAZON_SHORTENER_ENABLED = os.getenv("AMAZON_SHORTENER_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+AMAZON_SESSION_ID = os.getenv("AMAZON_SESSION_ID", "")
+AMAZON_SESSION_TOKEN = os.getenv("AMAZON_SESSION_TOKEN", "")
+AMAZON_UBID_ACBEG = os.getenv("AMAZON_UBID_ACBEG", "")
+AMAZON_AT_ACBEG = os.getenv("AMAZON_AT_ACBEG", "")
+AMAZON_SESS_AT_ACBEG = os.getenv("AMAZON_SESS_AT_ACBEG", "")
