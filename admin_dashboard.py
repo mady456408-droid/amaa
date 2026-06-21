@@ -38,6 +38,7 @@ from conversation_states import (
     AWAIT_AFFILIATE_TAG_VALUE,
     AWAIT_TELETHON_CODE,
     AWAIT_TELETHON_PASSWORD,
+    AWAIT_CUSTOM_IMAGE_POST,
 )
 from telethon_auth import (
     AUTH_STATE_CODE,
@@ -56,6 +57,10 @@ from manual_posts import (
     UD_MANUAL_MODE,
     handle_edit_draft,
     manual_state_handlers,
+)
+from custom_image_post import (
+    custom_image_state_handlers,
+    custom_image_callback_handlers,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +99,7 @@ CB_BACKUP = "adm:backup"
 CB_RESTORE = "adm:restore"
 CB_RESTORE_CONFIRM = "adm:restore:yes"
 CB_RESTORE_CANCEL = "adm:restore:no"
+CB_CUSTOM_IMAGE_POST = "adm:custom_image_post"
 
 UD_PENDING_RESTORE = "pending_restore_zip"
 
@@ -152,6 +158,9 @@ def _main_keyboard(paused: bool, telethon_connected: bool = True) -> InlineKeybo
             [
                 InlineKeyboardButton("🛠 Manual Post", callback_data=CB_MANUAL),
                 InlineKeyboardButton("🤖 AI Caption", callback_data=CB_AI),
+            ],
+            [
+                InlineKeyboardButton("🖼 Custom Image Post", callback_data=CB_CUSTOM_IMAGE_POST),
             ],
             [
                 InlineKeyboardButton(
@@ -715,6 +724,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return AWAIT_MANUAL_INPUT
 
+    if data == CB_CUSTOM_IMAGE_POST:
+        await _safe_edit_message_text(
+            query,
+            "🖼 <b>Custom Image Post</b>\n\n"
+            "Send a photo with its caption.\n"
+            "Any Amazon links in the caption will be shortened automatically.\n\n"
+            "/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return AWAIT_CUSTOM_IMAGE_POST
+
     if data == CB_AI:
         await _safe_edit_message_text(
             query,
@@ -1152,6 +1172,8 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 def build_admin_handlers() -> list:
     admin_filter = filters.User(user_id=ADMIN_USER_IDS) if ADMIN_USER_IDS else filters.ALL
     manual_states = manual_state_handlers(admin_filter)
+    custom_image_states = custom_image_state_handlers(admin_filter)
+    custom_image_callbacks = custom_image_callback_handlers()
 
     conv = ConversationHandler(
         entry_points=[
@@ -1209,11 +1231,13 @@ def build_admin_handlers() -> list:
                 ),
             ],
             **manual_states,
+            **custom_image_states,
         },
         fallbacks=[
             CommandHandler("cancel", cmd_cancel, filters=admin_filter),
             CallbackQueryHandler(on_callback, pattern=r"^adm:"),
             CallbackQueryHandler(handle_edit_draft, pattern=r"^edit_draft:\d+$"),
+            *custom_image_callbacks,
         ],
         allow_reentry=True,
     )
