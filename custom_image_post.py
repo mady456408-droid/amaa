@@ -20,7 +20,7 @@ from config import ADMIN_USER_IDS
 from conversation_states import AWAIT_CUSTOM_IMAGE_POST, AWAIT_DRAFT_CAPTION
 from affiliate_tag import apply_affiliate_tag
 from amazon_shortener import shorten_amazon_url
-from image_processor import apply_frame
+from image_processor import apply_frame_top_aligned
 from link_resolver import extract_all_urls_from_text, is_amazon_url
 from database import Database
 from file_cleanup import cleanup_files
@@ -112,10 +112,10 @@ async def receive_custom_image_post(
         await msg.reply_text("Failed to download image.")
         return
     
-    # Apply frame (using existing frame dimensions and logic)
+    # Apply frame (top-aligned fitting behavior)
     framed_path = f"temp_custom_image_framed_{timestamp}_{msg.message_id}.png"
     try:
-        apply_frame(image_path, output_path=framed_path)
+        apply_frame_top_aligned(image_path, output_path=framed_path)
         logger.info("CUSTOM IMAGE POST FRAME APPLIED path=%s", framed_path)
     except Exception as exc:
         logger.exception("CUSTOM IMAGE POST FRAME FAILED")
