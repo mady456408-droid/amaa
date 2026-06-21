@@ -1,0 +1,7 @@
+python-telegram-bot
+telethon
+playwright
+httpx
+Pillow
+python-dotenv
+google-genai
