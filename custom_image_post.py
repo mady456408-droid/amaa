@@ -112,7 +112,7 @@ async def receive_custom_image_post(
         await msg.reply_text("Failed to download image.")
         return
     
-    # Apply frame
+    # Apply frame (using existing frame dimensions and logic)
     framed_path = f"temp_custom_image_framed_{timestamp}_{msg.message_id}.png"
     try:
         apply_frame(image_path, output_path=framed_path)
