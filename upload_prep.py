@@ -15,7 +15,17 @@ def to_jpeg_for_telegram(image_path: str) -> str:
         return image_path
 
     out_path = f"{os.path.splitext(image_path)[0]}_upload.jpg"
-    img = Image.open(image_path).convert("RGB")
+    img = Image.open(image_path)
+
+    # If image has alpha channel, composite onto white background
+    # to prevent transparent pixels from becoming black in JPEG
+    if img.mode == "RGBA":
+        white_bg = Image.new("RGB", img.size, (255, 255, 255))
+        white_bg.paste(img, mask=img.split()[3])  # Use alpha channel as mask
+        img = white_bg
+    else:
+        img = img.convert("RGB")
+
     img.save(
         out_path,
         "JPEG",
