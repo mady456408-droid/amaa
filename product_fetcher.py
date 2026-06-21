@@ -89,11 +89,10 @@ def _require_screenshot(path: str | None, *, asin: str) -> str:
 
 def resolve_display_url(product: dict, clean_url: str) -> str:
     """
-    Creators vended URLs must not be modified.
-    Playwright fallback URLs use existing affiliate tag logic.
+    Always apply affiliate tag to display URLs regardless of data source.
     """
     if product.get("data_source") == "creators" and product.get("detail_page_url"):
-        return product["detail_page_url"]
+        return apply_affiliate_tag(product["detail_page_url"])
     return apply_affiliate_tag(clean_url)
 
 
