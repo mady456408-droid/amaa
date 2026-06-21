@@ -537,24 +537,15 @@ async def scrape_amazon(
 
             # Wait for product page signals instead of networkidle
             try:
-                page.locator("#landingImage").wait_for(
-                    state="visible",
+                await page.wait_for_selector(
+                    "#landingImage, #imgTagWrapperId img, #productTitle",
                     timeout=6000,
                 )
             except Exception:
-                try:
-                    page.locator("#imgTagWrapperId img").wait_for(
-                        state="visible",
-                        timeout=6000,
-                    )
-                except Exception:
-                    try:
-                        page.locator("#productTitle").wait_for(
-                            state="visible",
-                            timeout=6000,
-                        )
-                    except Exception:
-                        pass
+                logger.warning(
+                    "CONTINUE SHOPPING RECOVERY SIGNAL NOT FOUND asin=%s",
+                    asin,
+                )
 
             recovery_time = time.time() - recovery_start
             logger.info(
