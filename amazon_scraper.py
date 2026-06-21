@@ -5,6 +5,7 @@ Infrastructure only: shared Chromium process + fresh context per scrape.
 
 import logging
 import os
+import time
 
 from playwright.async_api import Browser, Playwright, async_playwright
 
@@ -528,8 +529,39 @@ async def scrape_amazon(
 
             await continue_button.first.click()
 
-            await page.wait_for_load_state("networkidle")
-            await page.wait_for_timeout(3000)
+            logger.info(
+                "CONTINUE SHOPPING RECOVERY START asin=%s",
+                asin,
+            )
+            recovery_start = time.time()
+
+            # Wait for product page signals instead of networkidle
+            try:
+                page.locator("#landingImage").wait_for(
+                    state="visible",
+                    timeout=6000,
+                )
+            except Exception:
+                try:
+                    page.locator("#imgTagWrapperId img").wait_for(
+                        state="visible",
+                        timeout=6000,
+                    )
+                except Exception:
+                    try:
+                        page.locator("#productTitle").wait_for(
+                            state="visible",
+                            timeout=6000,
+                        )
+                    except Exception:
+                        pass
+
+            recovery_time = time.time() - recovery_start
+            logger.info(
+                "CONTINUE SHOPPING RECOVERY COMPLETE asin=%s took=%.2fs",
+                asin,
+                recovery_time,
+            )
 
             logger.info(
                 "CONTINUE SHOPPING PAGE BYPASSED asin=%s final_url=%s",
