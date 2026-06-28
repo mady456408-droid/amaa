@@ -5,3 +5,5 @@ httpx
 Pillow
 python-dotenv
 google-genai
+arabic-reshaper
+python-bidi

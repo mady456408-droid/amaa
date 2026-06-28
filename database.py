@@ -146,6 +146,25 @@ class Database:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS creators_image_url_cache (
+                    asin TEXT PRIMARY KEY,
+                    image_url TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS creators_title_cache (
+                    asin TEXT PRIMARY KEY,
+                    english_title TEXT NOT NULL,
+                    arabic_title TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
 
     def seed_from_env(self, source_channel_id: int, destination_channel_id: int) -> None:
@@ -511,6 +530,75 @@ class Database:
                     expires,
                     now.isoformat(),
                 ),
+            )
+            conn.commit()
+
+    # --- Creators API product image URL cache (best resolved CDN URL per ASIN) ---
+
+    def get_creators_image_url(self, asin: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT image_url FROM creators_image_url_cache WHERE asin = ?",
+                (asin.upper(),),
+            ).fetchone()
+        if not row:
+            return None
+        url = (row["image_url"] or "").strip()
+        return url or None
+
+    def set_creators_image_url(self, asin: str, image_url: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creators_image_url_cache (asin, image_url, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(asin) DO UPDATE SET
+                    image_url = excluded.image_url,
+                    updated_at = excluded.updated_at
+                """,
+                (asin.upper(), image_url, now),
+            )
+            conn.commit()
+
+    # --- Creators API Arabic frame title cache ---
+
+    def get_creators_title_cache(self, asin: str) -> dict[str, str] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT english_title, arabic_title
+                FROM creators_title_cache
+                WHERE asin = ?
+                """,
+                (asin.upper(),),
+            ).fetchone()
+        if not row:
+            return None
+        english = (row["english_title"] or "").strip()
+        arabic = (row["arabic_title"] or "").strip()
+        if not english or not arabic:
+            return None
+        return {"english_title": english, "arabic_title": arabic}
+
+    def set_creators_title_cache(
+        self,
+        asin: str,
+        english_title: str,
+        arabic_title: str,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creators_title_cache (asin, english_title, arabic_title, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(asin) DO UPDATE SET
+                    english_title = excluded.english_title,
+                    arabic_title = excluded.arabic_title,
+                    updated_at = excluded.updated_at
+                """,
+                (asin.upper(), english_title, arabic_title, now),
             )
             conn.commit()
 

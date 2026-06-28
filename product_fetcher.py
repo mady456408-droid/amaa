@@ -14,6 +14,7 @@ from pathlib import Path
 import httpx
 
 from affiliate_tag import apply_affiliate_tag
+from amazon_image_url import amazon_image_url_candidates
 from amazon_scraper import (
     BrowserManager,
     scrape_amazon,
@@ -26,7 +27,8 @@ from creators_api import (
     creators_api_configured,
     get_creators_client,
 )
-from image_processor import apply_frame
+from creators_title import resolve_frame_title
+from image_processor import apply_frame, apply_frame_creators_product
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,39 @@ def _log_creators_fallback(asin: str, exc: CreatorsAPIError) -> None:
         _fallback_reason(exc),
         body,
     )
+
+
+def _maybe_apply_creators_frame(
+    image_path: str | None,
+    output_path: str,
+    *,
+    asin: str,
+    frame_enabled: bool,
+    title: str | None = None,
+    price: str | None = None,
+    list_price: str | None = None,
+    prime_exclusive: bool = False,
+) -> str | None:
+    """Apply Creators API framing (large FIT + badges) when enabled."""
+    if not frame_enabled:
+        if image_path and os.path.exists(image_path):
+            return image_path
+        return None
+    if image_path and os.path.exists(image_path):
+        return apply_frame_creators_product(
+            image_path,
+            output_path,
+            title=title,
+            price=price,
+            list_price=list_price,
+            prime_exclusive=prime_exclusive,
+        )
+    logger.warning(
+        "FRAME SKIPPED — image missing path=%s asin=%s",
+        image_path,
+        asin,
+    )
+    return None
 
 
 def _maybe_apply_frame(
@@ -96,7 +131,7 @@ def resolve_display_url(product: dict, clean_url: str) -> str:
     return apply_affiliate_tag(clean_url)
 
 
-async def _download_image(url: str, dest_path: str) -> bool:
+async def _download_image(url: str, dest_path: str, *, quiet: bool = False) -> bool:
     try:
         async with httpx.AsyncClient(
             timeout=30.0,
@@ -108,8 +143,45 @@ async def _download_image(url: str, dest_path: str) -> bool:
             Path(dest_path).write_bytes(resp.content)
         return True
     except Exception:
-        logger.exception("Failed to download product image from %s", url)
+        if not quiet:
+            logger.exception("Failed to download product image from %s", url)
         return False
+
+
+async def _download_best_amazon_image(
+    url: str,
+    dest_path: str,
+    *,
+    asin: str | None = None,
+    db=None,
+) -> bool:
+    """Try cached or highest-resolution Amazon CDN candidates, falling back on failure."""
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    if db is not None and asin:
+        cached = db.get_creators_image_url(asin)
+        if cached:
+            candidates.append(cached)
+            seen.add(cached)
+
+    for candidate in amazon_image_url_candidates(url):
+        if candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    if not candidates:
+        return False
+
+    for index, candidate in enumerate(candidates):
+        quiet = index < len(candidates) - 1
+        if await _download_image(candidate, dest_path, quiet=quiet):
+            if db is not None and asin:
+                db.set_creators_image_url(asin, candidate)
+            if candidate != url:
+                logger.info("CREATORS IMAGE — resolved higher resolution: %s", candidate)
+            return True
+    return False
 
 
 async def _resolve_product_image(
@@ -122,19 +194,30 @@ async def _resolve_product_image(
     frame_enabled: bool,
     coupon_enabled: bool,
     coupon_scan: dict | None,
+    price: str | None = None,
+    list_price: str | None = None,
+    prime_exclusive: bool = False,
+    title: str | None = None,
+    db=None,
 ) -> str:
     """Return local image path for publish (framed or raw)."""
     base_path = f"{scrape_key}_img.png"
 
     # Frame disabled — prefer Creators API image (no Playwright when coupon is off).
     if image_url:
-        if await _download_image(image_url, base_path):
+        if await _download_best_amazon_image(
+            image_url, base_path, asin=asin, db=db
+        ):
             if frame_enabled:
-                framed = _maybe_apply_frame(
+                framed = _maybe_apply_creators_frame(
                     base_path,
                     f"{scrape_key}_framed.png",
                     asin=asin,
                     frame_enabled=True,
+                    title=title,
+                    price=price,
+                    list_price=list_price,
+                    prime_exclusive=prime_exclusive,
                 )
                 return _require_screenshot(framed, asin=asin)
             return base_path
@@ -241,6 +324,8 @@ async def fetch_product(
                     )
                     _merge_coupon_data(product, coupon_scan)
 
+                frame_title = await resolve_frame_title(asin, item.title, db=db)
+
                 product["screenshot"] = await _resolve_product_image(
                     browser,
                     asin=asin,
@@ -250,6 +335,11 @@ async def fetch_product(
                     frame_enabled=frame_enabled,
                     coupon_enabled=coupon_enabled,
                     coupon_scan=coupon_scan,
+                    title=frame_title,
+                    price=item.price,
+                    list_price=item.list_price,
+                    prime_exclusive=item.prime_exclusive,
+                    db=db,
                 )
 
                 logger.info(

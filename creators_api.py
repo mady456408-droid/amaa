@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from amazon_image_url import pick_best_primary_image_url
 from config import (
     CREATORS_API_TPD,
     CREATORS_API_TPS,
@@ -34,11 +35,16 @@ logger = logging.getLogger(__name__)
 
 CATALOG_BASE = "https://creatorsapi.amazon/catalog/v1"
 
+# Amazon locale reference for www.amazon.eg — Arabic is ar_AE (not ar_EG).
+_EGYPT_ARABIC_LANGUAGE = "ar_AE"
+
 # Reusable resource profiles (request only what is needed).
 DRAFT_PROFILE: list[str] = [
     "itemInfo.title",
     "images.primary.large",
+    "images.primary.medium",
     "offersV2.listings.price",
+    "offersV2.listings.dealDetails",
 ]
 
 PRICE_DROP_PROFILE: list[str] = [
@@ -105,6 +111,14 @@ def _mask_partner_tag(tag: str) -> str:
     return f"{tag[:3]}****"
 
 
+def _languages_of_preference(marketplace: str) -> list[str] | None:
+    """Return Creators API languagesOfPreference for localized titles, if applicable."""
+    normalized = (marketplace or "").strip().lower().rstrip("/")
+    if normalized == "www.amazon.eg":
+        return [_EGYPT_ARABIC_LANGUAGE]
+    return None
+
+
 def _log_creators_request(
     *,
     version: str,
@@ -112,6 +126,7 @@ def _log_creators_request(
     partner_tag: str,
     item_ids: list[str],
     resources: list[str],
+    languages_of_preference: list[str] | None = None,
 ) -> None:
     """Log GetItems payload metadata — never log secrets or tokens."""
     logger.info(
@@ -119,12 +134,14 @@ def _log_creators_request(
         "version=v%s\n"
         "marketplace=%s\n"
         "partner_tag=%s\n"
+        "languages_of_preference=%r\n"
         "item_count=%s\n"
         "item_ids=%r\n"
         "resources=%r",
         version,
         marketplace,
         partner_tag,
+        languages_of_preference,
         len(item_ids),
         item_ids,
         resources,
@@ -273,6 +290,7 @@ class NormalizedItem:
     features: list[str]
     detail_page_url: str
     list_price: str | None = None
+    prime_exclusive: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -283,6 +301,7 @@ class NormalizedItem:
             "features": self.features,
             "detail_page_url": self.detail_page_url,
             "list_price": self.list_price,
+            "prime_exclusive": self.prime_exclusive,
         }
 
     @classmethod
@@ -295,6 +314,7 @@ class NormalizedItem:
             features=list(data.get("features") or []),
             detail_page_url=str(data.get("detail_page_url") or ""),
             list_price=data.get("list_price"),
+            prime_exclusive=bool(data.get("prime_exclusive")),
         )
 
 
@@ -451,23 +471,62 @@ def _pick_buy_box_listing(listings: list[dict]) -> dict | None:
     return listings[0] if listings else None
 
 
+def _contains_arabic(text: str) -> bool:
+    return any(
+        "\u0600" <= ch <= "\u06FF" or "\u0750" <= ch <= "\u077F" for ch in text
+    )
+
+
+def _extract_product_title(raw: dict[str, Any]) -> str:
+    """Prefer an Arabic title from the Creators API payload when available."""
+    title_obj = raw.get("itemInfo", {}).get("title", {})
+    if not isinstance(title_obj, dict):
+        return "Not found"
+
+    display = (title_obj.get("displayValue") or "").strip()
+    if display and _contains_arabic(display):
+        return display
+
+    candidates: list[str] = []
+    for key in ("localizedDisplayValues", "displayValues", "values"):
+        values = title_obj.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if isinstance(item, dict):
+                text = (item.get("displayValue") or item.get("value") or "").strip()
+            else:
+                text = str(item).strip()
+            if text:
+                candidates.append(text)
+
+    for value in title_obj.values():
+        if isinstance(value, str):
+            text = value.strip()
+            if text and text != display:
+                candidates.append(text)
+
+    for candidate in candidates:
+        if _contains_arabic(candidate):
+            return candidate
+
+    return display or "Not found"
+
+
 def normalize_item(raw: dict[str, Any]) -> NormalizedItem | None:
     """Map Creators API item JSON to normalized bot structure."""
     asin = (raw.get("asin") or "").strip().upper()
     if not asin:
         return None
 
-    title = ""
-    title_obj = raw.get("itemInfo", {}).get("title", {})
-    if isinstance(title_obj, dict):
-        title = (title_obj.get("displayValue") or "").strip()
-    if not title:
-        title = "Not found"
+    title = _extract_product_title(raw)
 
-    image_url: str | None = None
-    large = raw.get("images", {}).get("primary", {}).get("large", {})
-    if isinstance(large, dict):
-        image_url = large.get("url") or None
+    primary = raw.get("images", {}).get("primary", {})
+    image_url = pick_best_primary_image_url(primary)
+    if not image_url and isinstance(primary, dict):
+        large = primary.get("large", {})
+        if isinstance(large, dict):
+            image_url = large.get("url") or None
 
     features: list[str] = []
     feat_obj = raw.get("itemInfo", {}).get("features", {})
@@ -483,6 +542,7 @@ def normalize_item(raw: dict[str, Any]) -> NormalizedItem | None:
     listing = _pick_buy_box_listing(listings)
     price = "Not found"
     list_price: str | None = None
+    prime_exclusive = False
     if listing:
         price_obj = listing.get("price") or {}
         price = _format_egp_price(price_obj.get("money"))
@@ -492,6 +552,10 @@ def normalize_item(raw: dict[str, Any]) -> NormalizedItem | None:
             list_price = _format_egp_price(basis_money)
             if list_price == "Not found":
                 list_price = None
+        deal = listing.get("dealDetails") or {}
+        if isinstance(deal, dict):
+            access = (deal.get("accessType") or "").strip().upper()
+            prime_exclusive = access == "PRIME_EXCLUSIVE"
 
     return NormalizedItem(
         asin=asin,
@@ -501,6 +565,7 @@ def normalize_item(raw: dict[str, Any]) -> NormalizedItem | None:
         features=features,
         detail_page_url=detail_page_url,
         list_price=list_price,
+        prime_exclusive=prime_exclusive,
     )
 
 
@@ -606,6 +671,9 @@ class CreatorsClient:
             "marketplace": self.marketplace,
             "resources": resources,
         }
+        languages_of_preference = _languages_of_preference(self.marketplace)
+        if languages_of_preference:
+            body["languagesOfPreference"] = languages_of_preference
 
         headers = {
             "Content-Type": "application/json",
@@ -623,6 +691,7 @@ class CreatorsClient:
             partner_tag=self.partner_tag,
             item_ids=asins,
             resources=resources,
+            languages_of_preference=languages_of_preference,
         )
         _log_creators_headers(marketplace=self.marketplace)
 
