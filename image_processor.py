@@ -218,7 +218,7 @@ def shape_text(text: str) -> str:
         return text
     if not _contains_arabic(text):
         return text
-
+    
     # Linux / Railway
     if _HAS_RAQM:
         return arabic_reshaper.reshape(text)
@@ -406,11 +406,53 @@ def _font_supports_arabic(font: ImageFont.ImageFont) -> bool:
     return True
 
 
+def _font_char_has_glyph(font: ImageFont.FreeTypeFont, code: int) -> bool:
+    try:
+        if hasattr(font, "has_glyph"):
+            return bool(font.has_glyph(code))
+    except OSError:
+        return False
+
+    try:
+        ft_font = font.font
+        get_char_index = getattr(ft_font, "get_char_index", None)
+        if callable(get_char_index):
+            return get_char_index(code) != 0
+    except Exception:
+        return False
+
+    try:
+        ch = chr(code)
+        if hasattr(font, "getmask2"):
+            mask, _offset = font.getmask2(ch)
+            return mask.size[0] > 0 or mask.size[1] > 0
+        bbox = font.getbbox(ch)
+        return bool(bbox and bbox[2] > bbox[0] and bbox[3] > bbox[1])
+    except OSError:
+        return False
+
+
+def _font_supports_text(font: ImageFont.ImageFont, text: str) -> bool:
+    """True when the font provides a glyph for every visible character in text."""
+    if not text:
+        return True
+    if not isinstance(font, ImageFont.FreeTypeFont):
+        return False
+
+    for ch in text:
+        if ch in (" ", "\t", "\n"):
+            continue
+        if not _font_char_has_glyph(font, ord(ch)):
+            return False
+    return True
+
+
 def _first_usable_font(
     paths: list[str],
     size: int,
     *,
-    require_arabic: bool,
+    text: str | None = None,
+    require_arabic: bool = False,
 ) -> ImageFont.FreeTypeFont | None:
     seen: set[str] = set()
     for path in paths:
@@ -423,7 +465,10 @@ def _first_usable_font(
         font = _try_font_path(path, size)
         if font is None:
             continue
-        if require_arabic and not _font_supports_arabic(font):
+        if text is not None:
+            if not _font_supports_text(font, text):
+                continue
+        elif require_arabic and not _font_supports_arabic(font):
             continue
         return font
     return None
@@ -481,6 +526,7 @@ def _load_title_font(
         font = _first_usable_font(
             _ARABIC_TITLE_FONT_CANDIDATES,
             size,
+            text=title,
             require_arabic=True,
         )
         if font is not None:
@@ -488,6 +534,7 @@ def _load_title_font(
         font = _first_usable_font(
             _ARABIC_TITLE_FONT_FALLBACKS,
             size,
+            text=title,
             require_arabic=True,
         )
         if font is not None:
@@ -497,6 +544,7 @@ def _load_title_font(
     font = _first_usable_font(
         _LATIN_TITLE_FONT_CANDIDATES,
         size,
+        text=title,
         require_arabic=False,
     )
     if font is not None:
