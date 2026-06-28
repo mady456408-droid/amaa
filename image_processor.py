@@ -344,6 +344,23 @@ def apply_frame_creators_product(
     return output_path
 
 
+def _contains_latin_or_ascii_product_chars(text: str) -> bool:
+    """True when text includes Latin letters or ASCII digits/symbols."""
+    for ch in text:
+        if ch in " \t\n":
+            continue
+        if "A" <= ch <= "Z" or "a" <= ch <= "z":
+            return True
+        if ch.isascii() and (ch.isdigit() or not ch.isalpha()):
+            return True
+    return False
+
+
+def _is_mixed_script_title(text: str) -> bool:
+    """Arabic plus Latin letters or ASCII product codes/symbols."""
+    return _contains_arabic(text) and _contains_latin_or_ascii_product_chars(text)
+
+
 def _try_font_path(path: str, size: int) -> ImageFont.FreeTypeFont | None:
     if not os.path.isfile(path):
         return None
@@ -353,106 +370,9 @@ def _try_font_path(path: str, size: int) -> ImageFont.FreeTypeFont | None:
         return None
 
 
-_ARABIC_FONT_PROBE_CODES = (0x0627, 0x0628, 0x062A)
-_ARABIC_TITLE_FONT_BLOCKED = frozenset(
-    name.lower()
-    for name in (
-        "seguibl.ttf",
-        "seguibl.ttc",
-        "ariblk.ttf",
-        "arialblk.ttf",
-        "arial black.ttf",
-        "notosans-black.ttf",
-        "notosans-extrabold.ttf",
-    )
-)
-
-
-def _font_path_blocked_for_arabic(path: str) -> bool:
-    return os.path.basename(path).lower() in _ARABIC_TITLE_FONT_BLOCKED
-
-
-def _font_supports_arabic(font: ImageFont.ImageFont) -> bool:
-    if not isinstance(font, ImageFont.FreeTypeFont):
-        return False
-
-    path = getattr(font, "path", "") or ""
-    if path and _font_path_blocked_for_arabic(path):
-        return False
-
-    try:
-        if hasattr(font, "has_glyph"):
-            if not all(font.has_glyph(code) for code in _ARABIC_FONT_PROBE_CODES):
-                return False
-    except OSError:
-        return False
-
-    try:
-        ft_font = font.font
-        get_char_index = getattr(ft_font, "get_char_index", None)
-        if callable(get_char_index):
-            if any(get_char_index(code) == 0 for code in _ARABIC_FONT_PROBE_CODES):
-                return False
-    except Exception:
-        return False
-
-    try:
-        bbox = font.getbbox("\u0627\u0628\u062a")
-        if not bbox or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
-            return False
-    except OSError:
-        return False
-
-    return True
-
-
-def _font_char_has_glyph(font: ImageFont.FreeTypeFont, code: int) -> bool:
-    try:
-        if hasattr(font, "has_glyph"):
-            return bool(font.has_glyph(code))
-    except OSError:
-        return False
-
-    try:
-        ft_font = font.font
-        get_char_index = getattr(ft_font, "get_char_index", None)
-        if callable(get_char_index):
-            return get_char_index(code) != 0
-    except Exception:
-        return False
-
-    try:
-        ch = chr(code)
-        if hasattr(font, "getmask2"):
-            mask, _offset = font.getmask2(ch)
-            return mask.size[0] > 0 or mask.size[1] > 0
-        bbox = font.getbbox(ch)
-        return bool(bbox and bbox[2] > bbox[0] and bbox[3] > bbox[1])
-    except OSError:
-        return False
-
-
-def _font_supports_text(font: ImageFont.ImageFont, text: str) -> bool:
-    """True when the font provides a glyph for every visible character in text."""
-    if not text:
-        return True
-    if not isinstance(font, ImageFont.FreeTypeFont):
-        return False
-
-    for ch in text:
-        if ch in (" ", "\t", "\n"):
-            continue
-        if not _font_char_has_glyph(font, ord(ch)):
-            return False
-    return True
-
-
 def _first_usable_font(
     paths: list[str],
     size: int,
-    *,
-    text: str | None = None,
-    require_arabic: bool = False,
 ) -> ImageFont.FreeTypeFont | None:
     seen: set[str] = set()
     for path in paths:
@@ -460,19 +380,20 @@ def _first_usable_font(
         if normalized in seen:
             continue
         seen.add(normalized)
-        if require_arabic and _font_path_blocked_for_arabic(path):
-            continue
         font = _try_font_path(path, size)
-        if font is None:
-            continue
-        if text is not None:
-            if not _font_supports_text(font, text):
-                continue
-        elif require_arabic and not _font_supports_arabic(font):
-            continue
-        return font
+        if font is not None:
+            return font
     return None
 
+
+_MIXED_SCRIPT_TITLE_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
+    "C:/Windows/Fonts/segoeuib.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf",
+]
 
 _ARABIC_TITLE_FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf",
@@ -487,9 +408,6 @@ _ARABIC_TITLE_FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/noto/NotoSansArabic-SemiBold.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansArabic-SemiBold.ttf",
     "C:/Windows/Fonts/NotoSansArabic-SemiBold.ttf",
-    "C:/Windows/Fonts/arialbd.ttf",
-    "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf",
-    "C:/Windows/Fonts/segoeuib.ttf",
 ]
 
 _LATIN_TITLE_FONT_CANDIDATES = [
@@ -505,13 +423,12 @@ _LATIN_TITLE_FONT_CANDIDATES = [
 ]
 
 _ARABIC_TITLE_FONT_FALLBACKS = [
-    "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansArabic-Bold.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf",
-    "C:/Windows/Fonts/NotoSansArabic-Bold.ttf",
     "C:/Windows/Fonts/segoeuib.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
 ]
 
 
@@ -520,33 +437,22 @@ def _load_title_font(
     *,
     title: str | None = None,
 ) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    needs_arabic = bool(title and _contains_arabic(title))
-
-    if needs_arabic:
-        font = _first_usable_font(
-            _ARABIC_TITLE_FONT_CANDIDATES,
-            size,
-            text=title,
-            require_arabic=True,
-        )
-        if font is not None:
-            return font
-        font = _first_usable_font(
-            _ARABIC_TITLE_FONT_FALLBACKS,
-            size,
-            text=title,
-            require_arabic=True,
-        )
+    if title and _is_mixed_script_title(title):
+        font = _first_usable_font(_MIXED_SCRIPT_TITLE_FONT_CANDIDATES, size)
         if font is not None:
             return font
         return _load_font(size, bold=True)
 
-    font = _first_usable_font(
-        _LATIN_TITLE_FONT_CANDIDATES,
-        size,
-        text=title,
-        require_arabic=False,
-    )
+    if title and _contains_arabic(title):
+        font = _first_usable_font(_ARABIC_TITLE_FONT_CANDIDATES, size)
+        if font is not None:
+            return font
+        font = _first_usable_font(_ARABIC_TITLE_FONT_FALLBACKS, size)
+        if font is not None:
+            return font
+        return _load_font(size, bold=True)
+
+    font = _first_usable_font(_LATIN_TITLE_FONT_CANDIDATES, size)
     if font is not None:
         return font
     return _load_font(size, bold=True)
