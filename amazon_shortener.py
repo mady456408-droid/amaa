@@ -99,6 +99,8 @@ async def shorten_amazon_url(
     params = {
         "longUrl": long_url,
         "marketplaceId": _MARKETPLACE_ID,
+        "storeId": "ahmedhamedmoh-21",
+        
     }
 
     try:
