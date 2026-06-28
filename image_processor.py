@@ -431,31 +431,85 @@ _ARABIC_TITLE_FONT_FALLBACKS = [
     "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
 ]
 
+_MIXED_SCRIPT_UI_FONT_CANDIDATES_REGULAR = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf",
+]
+
+_ARABIC_UI_FONT_CANDIDATES_REGULAR = [
+    "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoNaskhArabic-Regular.ttf",
+    "C:/Windows/Fonts/NotoNaskhArabic-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf",
+    "C:/Windows/Fonts/NotoSansArabic-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoKufiArabic-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoKufiArabic-Regular.ttf",
+    "C:/Windows/Fonts/NotoKufiArabic-Regular.ttf",
+]
+
+_ARABIC_UI_FONT_FALLBACKS_REGULAR = [
+    "C:/Windows/Fonts/segoeui.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+]
+
+_LATIN_UI_FONT_CANDIDATES_REGULAR = [
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+]
+
+
+def _script_font_candidates(text: str, *, bold: bool) -> tuple[list[str], list[str]]:
+    """Return (primary, fallback) font paths for text using script-based policy."""
+    if _is_mixed_script_title(text):
+        if bold:
+            return _MIXED_SCRIPT_TITLE_FONT_CANDIDATES, []
+        return _MIXED_SCRIPT_UI_FONT_CANDIDATES_REGULAR, []
+
+    if _contains_arabic(text):
+        if bold:
+            return _ARABIC_TITLE_FONT_CANDIDATES, _ARABIC_TITLE_FONT_FALLBACKS
+        return _ARABIC_UI_FONT_CANDIDATES_REGULAR, _ARABIC_UI_FONT_FALLBACKS_REGULAR
+
+    if bold:
+        return _LATIN_TITLE_FONT_CANDIDATES, []
+    return _LATIN_UI_FONT_CANDIDATES_REGULAR, []
+
+
+def _load_ui_font(
+    size: int,
+    text: str,
+    *,
+    bold: bool = False,
+) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    primary, fallbacks = _script_font_candidates(text, bold=bold)
+    font = _first_usable_font(primary, size)
+    if font is not None:
+        return font
+    if fallbacks:
+        font = _first_usable_font(fallbacks, size)
+        if font is not None:
+            return font
+    return _load_font(size, bold=bold)
+
 
 def _load_title_font(
     size: int,
     *,
     title: str | None = None,
 ) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    if title and _is_mixed_script_title(title):
-        font = _first_usable_font(_MIXED_SCRIPT_TITLE_FONT_CANDIDATES, size)
-        if font is not None:
-            return font
-        return _load_font(size, bold=True)
-
-    if title and _contains_arabic(title):
-        font = _first_usable_font(_ARABIC_TITLE_FONT_CANDIDATES, size)
-        if font is not None:
-            return font
-        font = _first_usable_font(_ARABIC_TITLE_FONT_FALLBACKS, size)
-        if font is not None:
-            return font
-        return _load_font(size, bold=True)
-
-    font = _first_usable_font(_LATIN_TITLE_FONT_CANDIDATES, size)
-    if font is not None:
-        return font
-    return _load_font(size, bold=True)
+    return _load_ui_font(size, title or "", bold=True)
 
 
 def _load_font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -487,10 +541,6 @@ def _load_font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | Ima
             except OSError:
                 continue
     return ImageFont.load_default()
-
-
-def _load_badge_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    return _load_font(size, bold=False)
 
 
 def _composite_on_white(
@@ -659,9 +709,13 @@ def _measure_info_content_width(
         box_w, _ = _price_card_dimensions(draw, price.strip(), panel_width, scale)
         widths.append(box_w)
     if _valid_price(list_price):
-        font = _load_font(_scaled(_OLD_PRICE_FONT, scale), bold=False)
         number, currency = _parse_price_display(list_price.strip())
         text = f"{_OLD_PRICE_LABEL} {number} {currency}"
+        font = _load_ui_font(
+            _scaled(_OLD_PRICE_FONT, scale),
+            text,
+            bold=False,
+        )
         widths.append(_text_bbox(draw, text, font)[0])
     if title and title.strip() != "Not found":
         title_font, lines = _resolve_title_layout(
@@ -751,10 +805,10 @@ def _fit_price_number_font(
     min_size = max(28, _scaled(_PRICE_NUM_MIN, scale))
     step = max(2, _scaled(2, scale))
     for size in range(max_size, min_size - 1, -step):
-        font = _load_font(size, bold=True)
+        font = _load_ui_font(size, number_text, bold=True)
         if _text_bbox(draw, number_text, font)[0] <= inner_max:
             return font, size
-    font = _load_font(min_size, bold=True)
+    font = _load_ui_font(min_size, number_text, bold=True)
     return font, min_size
 
 
@@ -808,8 +862,8 @@ def _layout_price_card_inner(
 ) -> _PriceCardInnerLayout:
     number, currency = _parse_price_display(price)
     num_font, _ = _fit_price_number_font(draw, number, panel_width, scale)
-    label_font = _load_font(_scaled(_PRICE_LABEL_FONT, scale), bold=False)
-    curr_font = _load_font(_scaled(_PRICE_CURRENCY_FONT, scale), bold=False)
+    label_font = _load_ui_font(_scaled(_PRICE_LABEL_FONT, scale), _PRICE_LABEL, bold=False)
+    curr_font = _load_ui_font(_scaled(_PRICE_CURRENCY_FONT, scale), currency, bold=False)
 
     pad_x = _scaled(_PRICE_CARD_PAD_X, scale)
     pad_y = _scaled(_PRICE_CARD_PAD_Y, scale)
@@ -873,9 +927,9 @@ def _old_price_block_height(
     panel_width: int,
     scale: float,
 ) -> int:
-    font = _load_font(_scaled(_OLD_PRICE_FONT, scale), bold=False)
     number, currency = _parse_price_display(list_price)
     text = f"{_OLD_PRICE_LABEL} {number} {currency}"
+    font = _load_ui_font(_scaled(_OLD_PRICE_FONT, scale), text, bold=False)
     return _text_bbox(draw, text, font)[1]
 
 
@@ -921,9 +975,9 @@ def draw_old_price(
     rtl: bool,
     scale: float,
 ) -> int:
-    font = _load_font(_scaled(_OLD_PRICE_FONT, scale), bold=False)
     number, currency = _parse_price_display(list_price)
     text = f"{_OLD_PRICE_LABEL} {number} {currency}"
+    font = _load_ui_font(_scaled(_OLD_PRICE_FONT, scale), text, bold=False)
     tw, th = _text_bbox(draw, text, font)
     draw_x = panel_x + panel_width - tw if rtl else panel_x
     _draw_text(draw, (draw_x, y), text, font, _GRAY_TEXT)
@@ -1011,7 +1065,7 @@ def draw_discount_badge(
         return None
 
     draw = ImageDraw.Draw(canvas)
-    font = _load_badge_font(_scaled(_DISCOUNT_BADGE_FONT, scale))
+    font = _load_ui_font(_scaled(_DISCOUNT_BADGE_FONT, scale), discount_text, bold=False)
     text_w, text_h = _text_bbox(draw, discount_text, font)
     pad_x = _scaled(_DISCOUNT_BADGE_PAD_X, scale)
     pad_y = _scaled(_DISCOUNT_BADGE_PAD_Y, scale)
@@ -1041,8 +1095,8 @@ def draw_prime_badge(
     scale: float = 1.0,
 ) -> None:
     draw = ImageDraw.Draw(canvas)
-    font = _load_badge_font(_scaled(_PRIME_BADGE_FONT, scale))
     text = "prime"
+    font = _load_ui_font(_scaled(_PRIME_BADGE_FONT, scale), text, bold=False)
     text_w, _ = _text_bbox(draw, text, font)
     pad_x = _scaled(_PRIME_BADGE_PAD_X, scale)
     pad_y = _scaled(_PRIME_BADGE_PAD_Y, scale)
