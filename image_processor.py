@@ -8,6 +8,9 @@ from bidi.algorithm import get_display
 from PIL import Image, ImageDraw, ImageFont
 
 from coupon_price import parse_price_number
+from PIL import features
+
+_HAS_RAQM = features.check("raqm")
 
 _FRAME_PADDING = 40
 _LEFT_PANEL_RATIO_MIN = 0.30
@@ -213,9 +216,15 @@ def _contains_arabic(text: str) -> bool:
 def shape_text(text: str) -> str:
     if not text:
         return text
-    if _contains_arabic(text):
-        return get_display(arabic_reshaper.reshape(text))
-    return text
+    if not _contains_arabic(text):
+        return text
+
+    # Linux / Railway
+    if _HAS_RAQM:
+        return arabic_reshaper.reshape(text)
+
+    # Windows
+    return get_display(arabic_reshaper.reshape(text))
 
 
 def _draw_text(
