@@ -59,6 +59,33 @@ _CORNER_BADGE_MARGIN = 32
 _PRICE_LABEL = "السعر الآن"
 _OLD_PRICE_LABEL = "بدلاً من"
 _CURRENCY_LABEL = "جنيه"
+_COMPOSITE_MIN_PRODUCTS = 2
+_COMPOSITE_MAX_PRODUCTS = 6
+_COMPOSITE_OUTER_PAD = 24
+_COMPOSITE_GRID_GAP = 20
+_COMPOSITE_CARD_PAD = 12
+_COMPOSITE_IMG_TEXT_GAP = 10
+_COMPOSITE_TITLE_PRICE_GAP = 8
+_COMPOSITE_TITLE_FONT_MAX = 30
+_COMPOSITE_TITLE_FONT_MIN = 17
+_COMPOSITE_PORTRAIT_HEIGHT_RATIO = 1.18
+_COMPOSITE_MIN_IMAGE_RATIO = 0.42
+
+
+class CreatorsProductCard(NamedTuple):
+    image_path: str
+    title: str | None = None
+    price: str | None = None
+    list_price: str | None = None
+    prime_exclusive: bool = False
+
+
+class CompositeCardSlot(NamedTuple):
+    x: int
+    y: int
+    width: int
+    height: int
+    portrait: bool = False
 
 
 class FrameGeometry(NamedTuple):
@@ -1275,6 +1302,391 @@ def _draw_corner_badges(
             anchor_y=_CORNER_BADGE_MARGIN,
             scale=layout_scale,
         )
+
+
+def _composite_grid_metrics(
+    count: int,
+    slot_width: int,
+    slot_height: int,
+) -> tuple[int, int, int, int]:
+    """Return (card_w, card_h, portrait_h, outer_pad) for the composite grid."""
+    outer = _COMPOSITE_OUTER_PAD
+    gap = _COMPOSITE_GRID_GAP
+    inner_w = slot_width - outer * 2
+    inner_h = slot_height - outer * 2
+    card_w = (inner_w - gap) // 2
+
+    if count == 2:
+        return card_w, inner_h, 0, outer
+
+    if count == 3:
+        card_h = (inner_h - gap) // 2
+        return card_w, card_h, 0, outer
+
+    if count in (4, 6):
+        rows = 2 if count == 4 else 3
+        card_h = (inner_h - gap * (rows - 1)) // rows
+        return card_w, card_h, 0, outer
+
+    boost = _COMPOSITE_PORTRAIT_HEIGHT_RATIO
+    card_h = max(1, int((inner_h - gap * 2) / (2 + boost)))
+    portrait_h = max(1, int(card_h * boost))
+    return card_w, card_h, portrait_h, outer
+
+
+def _composite_card_slots(
+    count: int,
+    slot_width: int,
+    slot_height: int,
+) -> list[CompositeCardSlot]:
+    """Compute pixel rectangles for each composite card."""
+    card_w, card_h, portrait_h, outer = _composite_grid_metrics(
+        count, slot_width, slot_height
+    )
+    gap = _COMPOSITE_GRID_GAP
+    slots: list[CompositeCardSlot] = []
+
+    if count == 2:
+        y = outer
+        slots.append(CompositeCardSlot(outer, y, card_w, card_h))
+        slots.append(CompositeCardSlot(outer + card_w + gap, y, card_w, card_h))
+        return slots
+
+    if count == 3:
+        y0 = outer
+        slots.append(CompositeCardSlot(outer, y0, card_w, card_h))
+        slots.append(CompositeCardSlot(outer + card_w + gap, y0, card_w, card_h))
+        y1 = outer + card_h + gap
+        centered_x = outer + (slot_width - outer * 2 - card_w) // 2
+        slots.append(CompositeCardSlot(centered_x, y1, card_w, card_h))
+        return slots
+
+    if count in (4, 5):
+        positions = (
+            (outer, outer),
+            (outer + card_w + gap, outer),
+            (outer, outer + card_h + gap),
+            (outer + card_w + gap, outer + card_h + gap),
+        )
+        for x, y in positions:
+            slots.append(CompositeCardSlot(x, y, card_w, card_h))
+
+    if count == 6:
+        for row in range(3):
+            y = outer + row * (card_h + gap)
+            slots.append(CompositeCardSlot(outer, y, card_w, card_h))
+            slots.append(CompositeCardSlot(outer + card_w + gap, y, card_w, card_h))
+        return slots
+
+    if count == 5:
+        grid_bottom = outer + card_h * 2 + gap
+        portrait_y = grid_bottom + gap
+        centered_x = outer + (slot_width - outer * 2 - card_w) // 2
+        slots.append(
+            CompositeCardSlot(
+                centered_x,
+                portrait_y,
+                card_w,
+                portrait_h,
+                portrait=True,
+            )
+        )
+
+    return slots
+
+
+def _resolve_composite_title_layout(
+    draw: ImageDraw.ImageDraw,
+    title: str,
+    max_width: int,
+    scale: float,
+) -> tuple[ImageFont.ImageFont, list[str]]:
+    max_size = _scaled(_COMPOSITE_TITLE_FONT_MAX, scale)
+    min_size = max(12, _scaled(_COMPOSITE_TITLE_FONT_MIN, scale))
+    step = max(2, _scaled(2, scale))
+    for size in range(max_size, min_size - 1, -step):
+        font = _load_title_font(size, title=title)
+        lines = _wrap_title_lines(draw, title, font, max_width, _TITLE_MAX_LINES)
+        if lines:
+            return font, lines
+    font = _load_title_font(min_size, title=title)
+    return font, _wrap_title_lines(draw, title, font, max_width, _TITLE_MAX_LINES)
+
+
+def _composite_title_block_height(
+    draw: ImageDraw.ImageDraw,
+    title: str | None,
+    max_width: int,
+    scale: float,
+) -> int:
+    if not title or title.strip() == "Not found":
+        return 0
+    title_font, lines = _resolve_composite_title_layout(
+        draw, title.strip(), max_width, scale
+    )
+    if not lines:
+        return 0
+    line_gap = _scaled(_TITLE_LINE_GAP, scale)
+    height = 0
+    for index, line in enumerate(lines):
+        height += _text_bbox(draw, line, title_font)[1]
+        if index < len(lines) - 1:
+            height += line_gap
+    return height
+
+
+def _composite_price_block_height(
+    draw: ImageDraw.ImageDraw,
+    price: str | None,
+    max_width: int,
+    scale: float,
+) -> int:
+    if not _valid_price(price):
+        return 0
+    _, box_h = _price_card_dimensions(draw, price.strip(), max_width, scale)
+    return box_h
+
+
+def _composite_card_text_height(
+    draw: ImageDraw.ImageDraw,
+    *,
+    title: str | None,
+    price: str | None,
+    inner_width: int,
+    scale: float,
+) -> int:
+    total = 0
+    title_h = _composite_title_block_height(draw, title, inner_width, scale)
+    price_h = _composite_price_block_height(draw, price, inner_width, scale)
+    if title_h:
+        total += title_h
+    if price_h:
+        if title_h:
+            total += _scaled(_COMPOSITE_TITLE_PRICE_GAP, scale)
+        total += price_h
+    return total
+
+
+def _composite_card_content_fits(
+    draw: ImageDraw.ImageDraw,
+    *,
+    title: str | None,
+    price: str | None,
+    inner_width: int,
+    inner_height: int,
+    scale: float,
+) -> bool:
+    text_h = _composite_card_text_height(
+        draw,
+        title=title,
+        price=price,
+        inner_width=inner_width,
+        scale=scale,
+    )
+    gaps = 0
+    if text_h:
+        gaps += _scaled(_COMPOSITE_IMG_TEXT_GAP, scale)
+    min_image_h = max(1, int(inner_height * _COMPOSITE_MIN_IMAGE_RATIO))
+    return text_h + gaps + min_image_h <= inner_height
+
+
+def _composite_content_scale(
+    draw: ImageDraw.ImageDraw,
+    products: list[CreatorsProductCard],
+    slots: list[CompositeCardSlot],
+) -> float:
+    for scale in (1.0, 0.92, 0.85, 0.78, 0.72, 0.66, 0.60):
+        if all(
+            _composite_card_content_fits(
+                draw,
+                title=product.title,
+                price=product.price,
+                inner_width=slot.width - 2 * _scaled(_COMPOSITE_CARD_PAD, scale),
+                inner_height=slot.height - 2 * _scaled(_COMPOSITE_CARD_PAD, scale),
+                scale=scale,
+            )
+            for product, slot in zip(products, slots)
+        ):
+            return scale
+    return 0.60
+
+
+def _render_card_product_image(
+    image_path: str,
+    area_w: int,
+    area_h: int,
+) -> Image.Image:
+    image = _neutralize_transparent_rgb(
+        _trim_product_borders(Image.open(image_path))
+    )
+    trimmed_w, trimmed_h = image.size
+    aspect = trimmed_w / trimmed_h if trimmed_h else 1.0
+    scale = _compute_product_scale(trimmed_w, trimmed_h, area_w, area_h)
+    scaled_w = max(1, int(trimmed_w * scale))
+    scaled_h = max(1, int(trimmed_h * scale))
+    image_scaled = image.resize((scaled_w, scaled_h), Image.Resampling.LANCZOS)
+    rel_x, rel_y = _compute_product_position(
+        area_w, area_h, scaled_w, scaled_h, aspect
+    )
+    return _composite_on_white((area_w, area_h), image_scaled, (rel_x, rel_y))
+
+
+def _draw_composite_title(
+    draw: ImageDraw.ImageDraw,
+    *,
+    y: int,
+    title: str,
+    panel_x: int,
+    panel_width: int,
+    scale: float,
+) -> int:
+    title_font, lines = _resolve_composite_title_layout(
+        draw, title, panel_width, scale
+    )
+    line_gap = _scaled(_TITLE_LINE_GAP, scale)
+    for line in lines:
+        line_h = _draw_aligned_text(
+            draw,
+            panel_x,
+            y,
+            line,
+            title_font,
+            _BLACK_TEXT,
+            panel_x,
+            panel_width,
+            _contains_arabic(line),
+        )
+        y += line_h + line_gap
+    if lines:
+        y -= line_gap
+    return y
+
+
+def _draw_composite_price(
+    draw: ImageDraw.ImageDraw,
+    *,
+    y: int,
+    price: str,
+    panel_x: int,
+    panel_width: int,
+    scale: float,
+) -> int:
+    return draw_price_card(
+        draw,
+        y=y,
+        price=price,
+        panel_x=panel_x,
+        panel_width=panel_width,
+        rtl=True,
+        scale=scale,
+    )
+
+
+def _draw_composite_product_card(
+    canvas: Image.Image,
+    slot: CompositeCardSlot,
+    product: CreatorsProductCard,
+    scale: float,
+) -> None:
+    draw = ImageDraw.Draw(canvas)
+    pad = _scaled(_COMPOSITE_CARD_PAD, scale)
+    inner_x = slot.x + pad
+    inner_y = slot.y + pad
+    inner_w = max(1, slot.width - pad * 2)
+    inner_h = max(1, slot.height - pad * 2)
+
+    text_h = _composite_card_text_height(
+        draw,
+        title=product.title,
+        price=product.price,
+        inner_width=inner_w,
+        scale=scale,
+    )
+    img_text_gap = _scaled(_COMPOSITE_IMG_TEXT_GAP, scale) if text_h else 0
+    image_h = max(1, inner_h - text_h - img_text_gap)
+    image_area = _render_card_product_image(product.image_path, inner_w, image_h)
+    canvas.paste(image_area, (inner_x, inner_y))
+
+    cursor_y = inner_y + image_h + img_text_gap
+    has_title = bool(product.title and product.title.strip() != "Not found")
+    has_price = _valid_price(product.price)
+
+    if has_title:
+        cursor_y = _draw_composite_title(
+            draw,
+            y=cursor_y,
+            title=product.title.strip(),
+            panel_x=inner_x,
+            panel_width=inner_w,
+            scale=scale,
+        )
+
+    if has_price:
+        if has_title:
+            cursor_y += _scaled(_COMPOSITE_TITLE_PRICE_GAP, scale)
+        _draw_composite_price(
+            draw,
+            y=cursor_y,
+            price=product.price.strip(),
+            panel_x=inner_x,
+            panel_width=inner_w,
+            scale=scale,
+        )
+
+
+def _apply_frame_creators_composite(
+    output_path: str,
+    products: list[CreatorsProductCard],
+) -> str:
+    """Render 2–6 products in an automatic composite grid inside the frame."""
+    frame_path = "frame.png"
+    frame = Image.open(frame_path).convert("RGBA")
+    geo = get_frame_geometry(frame)
+
+    canvas = Image.new("RGBA", (geo.slot_width, geo.slot_height), (255, 255, 255, 255))
+    slots = _composite_card_slots(len(products), geo.slot_width, geo.slot_height)
+    probe = ImageDraw.Draw(canvas)
+    layout_scale = _composite_content_scale(probe, products, slots)
+
+    for product, slot in zip(products, slots):
+        _draw_composite_product_card(canvas, slot, product, layout_scale)
+
+    final_canvas = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+    final_canvas.paste(canvas, (geo.slot_x, geo.slot_y))
+    final = Image.alpha_composite(final_canvas, frame)
+    final.save(output_path)
+    return output_path
+
+
+def apply_frame_creators_products(
+    output_path: str,
+    products: list[CreatorsProductCard],
+) -> str:
+    """
+    Frame one to six Creators API products.
+
+    Single product uses the existing premium layout unchanged.
+    Two to six products automatically use the composite grid layout.
+    """
+    if not products:
+        raise ValueError("At least one product is required")
+    if len(products) > _COMPOSITE_MAX_PRODUCTS:
+        raise ValueError(
+            f"Composite layout supports at most {_COMPOSITE_MAX_PRODUCTS} products"
+        )
+
+    if len(products) == 1:
+        product = products[0]
+        return apply_frame_creators_product(
+            product.image_path,
+            output_path,
+            title=product.title,
+            price=product.price,
+            list_price=product.list_price,
+            prime_exclusive=product.prime_exclusive,
+        )
+
+    return _apply_frame_creators_composite(output_path, products)
 
 
 def apply_frame_top_aligned(image_path, output_path="framed_custom.png"):
