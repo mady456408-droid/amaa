@@ -14,6 +14,11 @@ SETTING_AI_CUSTOM_PROMPT = "ai_custom_prompt"
 SETTING_AFFILIATE_TAG_ENABLED = "affiliate_tag_enabled"
 SETTING_AFFILIATE_TAG_VALUE = "affiliate_tag_value"
 SETTING_COUPON_DETECTION_ENABLED = "coupon_detection_enabled"
+SETTING_PRODUCT_BUTTONS_ENABLED = "product_buttons_enabled"
+SETTING_FIXED_BUTTONS_POSITION = "fixed_buttons_position"
+SETTING_PRODUCT_BUTTON_LAYOUT = "product_button_layout"
+SETTING_PRODUCT_BUTTON_TEMPLATE = "product_button_template"
+SETTING_MAX_PRODUCT_BUTTONS = "max_product_buttons"
 
 
 class Database:
@@ -113,6 +118,8 @@ class Database:
                 conn.execute("ALTER TABLE draft_posts ADD COLUMN coupon TEXT")
             if "list_price" not in draft_cols:
                 conn.execute("ALTER TABLE draft_posts ADD COLUMN list_price TEXT")
+            if "short_title" not in draft_cols:
+                conn.execute("ALTER TABLE draft_posts ADD COLUMN short_title TEXT")
 
             conn.execute(
                 """
@@ -161,6 +168,19 @@ class Database:
                     asin TEXT PRIMARY KEY,
                     english_title TEXT NOT NULL,
                     arabic_title TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fixed_buttons (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
@@ -315,6 +335,47 @@ class Database:
 
     def set_coupon_detection_enabled(self, enabled: bool) -> None:
         self.set_setting(SETTING_COUPON_DETECTION_ENABLED, "1" if enabled else "0")
+
+    def get_product_buttons_enabled(self) -> bool:
+        raw = self.get_setting(SETTING_PRODUCT_BUTTONS_ENABLED)
+        if raw is None:
+            return True  # Default ON
+        return raw == "1"
+
+    def set_product_buttons_enabled(self, enabled: bool) -> None:
+        self.set_setting(SETTING_PRODUCT_BUTTONS_ENABLED, "1" if enabled else "0")
+
+    def get_fixed_buttons_position(self) -> str:
+        return self.get_setting(SETTING_FIXED_BUTTONS_POSITION) or "BOTTOM"
+
+    def set_fixed_buttons_position(self, position: str) -> None:
+        self.set_setting(SETTING_FIXED_BUTTONS_POSITION, position)
+
+    def get_product_button_layout(self) -> str:
+        return self.get_setting(SETTING_PRODUCT_BUTTON_LAYOUT) or "VERTICAL"
+
+    def set_product_button_layout(self, layout: str) -> None:
+        self.set_setting(SETTING_PRODUCT_BUTTON_LAYOUT, layout)
+
+    def get_product_button_template(self) -> str:
+        return self.get_setting(SETTING_PRODUCT_BUTTON_TEMPLATE) or "🛒 شراء {name}"
+
+    def set_product_button_template(self, template: str) -> None:
+        self.set_setting(SETTING_PRODUCT_BUTTON_TEMPLATE, template)
+
+    def get_max_product_buttons(self) -> int:
+        raw = self.get_setting(SETTING_MAX_PRODUCT_BUTTONS)
+        if raw is None:
+            return 5  # Default 5
+        try:
+            val = int(raw)
+            return max(1, min(5, val))  # Clamp between 1 and 5
+        except ValueError:
+            return 5
+
+    def set_max_product_buttons(self, count: int) -> None:
+        clamped = max(1, min(5, count))
+        self.set_setting(SETTING_MAX_PRODUCT_BUTTONS, str(clamped))
 
     def get_last_published_asins(self, limit: int = 10) -> set[str]:
         with self._connect() as conn:
@@ -670,3 +731,86 @@ class Database:
                 (affiliate_url, short_url, now),
             )
             conn.commit()
+
+    # --- Fixed Buttons management ---
+
+    def create_fixed_button(
+        self, title: str, url: str, enabled: bool = True, sort_order: int = 0
+    ) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO fixed_buttons (title, url, enabled, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (title, url, 1 if enabled else 0, sort_order, now, now),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def get_fixed_button(self, button_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM fixed_buttons WHERE id = ?",
+                (button_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_fixed_buttons(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        query = "SELECT * FROM fixed_buttons"
+        if enabled_only:
+            query += " WHERE enabled = 1"
+        query += " ORDER BY sort_order ASC, id ASC"
+        with self._connect() as conn:
+            rows = conn.execute(query).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_fixed_button(
+        self,
+        button_id: int,
+        title: str | None = None,
+        url: str | None = None,
+        enabled: bool | None = None,
+        sort_order: int | None = None,
+    ) -> bool:
+        updates = []
+        params = []
+        now = datetime.now(timezone.utc).isoformat()
+
+        if title is not None:
+            updates.append("title = ?")
+            params.append(title)
+        if url is not None:
+            updates.append("url = ?")
+            params.append(url)
+        if enabled is not None:
+            updates.append("enabled = ?")
+            params.append(1 if enabled else 0)
+        if sort_order is not None:
+            updates.append("sort_order = ?")
+            params.append(sort_order)
+
+        if not updates:
+            return False
+
+        updates.append("updated_at = ?")
+        params.append(now)
+        params.append(button_id)
+
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"UPDATE fixed_buttons SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def delete_fixed_button(self, button_id: int) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM fixed_buttons WHERE id = ?",
+                (button_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0

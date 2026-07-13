@@ -39,6 +39,8 @@ from conversation_states import (
     AWAIT_TELETHON_CODE,
     AWAIT_TELETHON_PASSWORD,
     AWAIT_CUSTOM_IMAGE_POST,
+    AWAIT_FIXED_BUTTON_TITLE,
+    AWAIT_FIXED_BUTTON_URL,
 )
 from telethon_auth import (
     AUTH_STATE_CODE,
@@ -100,6 +102,26 @@ CB_RESTORE = "adm:restore"
 CB_RESTORE_CONFIRM = "adm:restore:yes"
 CB_RESTORE_CANCEL = "adm:restore:no"
 CB_CUSTOM_IMAGE_POST = "adm:custom_image_post"
+CB_INLINE_BUTTONS = "adm:inline_buttons"
+CB_PRODUCT_BUTTONS_TOGGLE = "adm:inline_buttons:product_toggle"
+CB_FIXED_BUTTONS_LIST = "adm:inline_buttons:fixed_list"
+CB_FIXED_BUTTONS_ADD = "adm:inline_buttons:fixed_add"
+CB_FIXED_BUTTONS_EDIT = "adm:inline_buttons:fixed_edit:"
+CB_FIXED_BUTTONS_DELETE = "adm:inline_buttons:fixed_delete:"
+CB_FIXED_BUTTONS_ENABLE = "adm:inline_buttons:fixed_enable:"
+CB_FIXED_BUTTONS_DISABLE = "adm:inline_buttons:fixed_disable:"
+CB_FIXED_BUTTONS_UP = "adm:inline_buttons:fixed_up:"
+CB_FIXED_BUTTONS_DOWN = "adm:inline_buttons:fixed_down:"
+CB_FIXED_POSITION_TOP = "adm:inline_buttons:fixed_pos:top"
+CB_FIXED_POSITION_BOTTOM = "adm:inline_buttons:fixed_pos:bottom"
+CB_PRODUCT_LAYOUT_VERTICAL = "adm:inline_buttons:prod_layout:vertical"
+CB_PRODUCT_LAYOUT_TWO_COLUMNS = "adm:inline_buttons:prod_layout:two_columns"
+CB_PRODUCT_TEMPLATE_SET = "adm:inline_buttons:prod_template:set"
+CB_MAX_PRODUCT_1 = "adm:inline_buttons:max_prod:1"
+CB_MAX_PRODUCT_2 = "adm:inline_buttons:max_prod:2"
+CB_MAX_PRODUCT_3 = "adm:inline_buttons:max_prod:3"
+CB_MAX_PRODUCT_4 = "adm:inline_buttons:max_prod:4"
+CB_MAX_PRODUCT_5 = "adm:inline_buttons:max_prod:5"
 
 UD_PENDING_RESTORE = "pending_restore_zip"
 
@@ -173,6 +195,12 @@ def _main_keyboard(paused: bool, telethon_connected: bool = True) -> InlineKeybo
                 ),
             ],
             [
+                InlineKeyboardButton(
+                    "🔘 Inline Buttons",
+                    callback_data=CB_INLINE_BUTTONS,
+                ),
+            ],
+            [
                 InlineKeyboardButton("💾 Backup", callback_data=CB_BACKUP),
                 InlineKeyboardButton("♻ Restore Backup", callback_data=CB_RESTORE),
             ],
@@ -196,6 +224,166 @@ def _keyboard_for_app(app, paused: bool | None = None) -> InlineKeyboardMarkup:
     if paused is None:
         paused = app.bot_data.get("paused", False)
     return _main_keyboard(paused, is_telethon_connected(app))
+
+
+async def _inline_buttons_menu_text(db: Database) -> str:
+    product_enabled = db.get_product_buttons_enabled()
+    product_status = "✅ ON" if product_enabled else "❌ OFF"
+    fixed_count = len(db.list_fixed_buttons(enabled_only=True))
+    fixed_position = db.get_fixed_buttons_position()
+    product_layout = db.get_product_button_layout()
+    product_template = db.get_product_button_template()
+    max_product_buttons = db.get_max_product_buttons()
+    return (
+        f"🔘 <b>Inline Buttons Settings</b>\n\n"
+        f"<b>Product Buttons:</b> {product_status}\n"
+        f"<b>Max Product Buttons:</b> {max_product_buttons}\n"
+        f"<b>Fixed Buttons:</b> {fixed_count} enabled\n"
+        f"<b>Fixed Position:</b> {fixed_position}\n"
+        f"<b>Product Layout:</b> {product_layout}\n"
+        f"<b>Product Template:</b> {product_template}\n\n"
+        f"Product buttons add purchase links for each product.\n"
+        f"Fixed buttons are always shown."
+    )
+
+
+def _inline_buttons_keyboard(db: Database) -> InlineKeyboardMarkup:
+    product_enabled = db.get_product_buttons_enabled()
+    product_status = "ON" if product_enabled else "OFF"
+    fixed_position = db.get_fixed_buttons_position()
+    product_layout = db.get_product_button_layout()
+    max_product_buttons = db.get_max_product_buttons()
+
+    # Build max product buttons row
+    max_buttons_row = []
+    for i in range(1, 6):
+        label = str(i) if i != max_product_buttons else f"✓{i}"
+        callback = globals()[f"CB_MAX_PRODUCT_{i}"]
+        max_buttons_row.append(
+            InlineKeyboardButton(label, callback_data=callback)
+        )
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"🛒 Product Buttons: {product_status}",
+                    callback_data=CB_PRODUCT_BUTTONS_TOGGLE,
+                ),
+            ],
+            max_buttons_row,
+            [
+                InlineKeyboardButton(
+                    f"📍 Fixed Position: {fixed_position}",
+                    callback_data=CB_FIXED_POSITION_TOP if fixed_position == "BOTTOM" else CB_FIXED_POSITION_BOTTOM,
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"📐 Product Layout: {product_layout}",
+                    callback_data=CB_PRODUCT_LAYOUT_TWO_COLUMNS if product_layout == "VERTICAL" else CB_PRODUCT_LAYOUT_VERTICAL,
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📝 Product Template",
+                    callback_data=CB_PRODUCT_TEMPLATE_SET,
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📋 Fixed Buttons",
+                    callback_data=CB_FIXED_BUTTONS_LIST,
+                ),
+            ],
+            [InlineKeyboardButton("« Back", callback_data=CB_MAIN)],
+        ]
+    )
+
+
+async def _fixed_buttons_list_text(db: Database) -> str:
+    buttons = db.list_fixed_buttons()
+    if not buttons:
+        return "📋 <b>Fixed Buttons</b>\n\nNo fixed buttons configured."
+
+    text = "📋 <b>Fixed Buttons</b>\n\n"
+    for i, btn in enumerate(buttons, 1):
+        status = "✅" if btn["enabled"] else "❌"
+        text += f"{status} {i}. {btn['title']}\n"
+        text += f"   {btn['url']}\n\n"
+
+    return text
+
+
+def _fixed_buttons_list_keyboard(db: Database) -> InlineKeyboardMarkup:
+    buttons = db.list_fixed_buttons()
+    rows = []
+
+    for btn in buttons:
+        btn_row = []
+        # Edit button
+        btn_row.append(
+            InlineKeyboardButton(
+                "✏️", callback_data=f"{CB_FIXED_BUTTONS_EDIT}{btn['id']}"
+            )
+        )
+        # Enable/Disable button
+        if btn["enabled"]:
+            btn_row.append(
+                InlineKeyboardButton(
+                    "❌", callback_data=f"{CB_FIXED_BUTTONS_DISABLE}{btn['id']}"
+                )
+            )
+        else:
+            btn_row.append(
+                InlineKeyboardButton(
+                    "✅", callback_data=f"{CB_FIXED_BUTTONS_ENABLE}{btn['id']}"
+                )
+            )
+        # Up/Down buttons
+        btn_row.append(
+            InlineKeyboardButton("⬆️", callback_data=f"{CB_FIXED_BUTTONS_UP}{btn['id']}")
+        )
+        btn_row.append(
+            InlineKeyboardButton("⬇️", callback_data=f"{CB_FIXED_BUTTONS_DOWN}{btn['id']}")
+        )
+        # Delete button
+        btn_row.append(
+            InlineKeyboardButton(
+                "🗑", callback_data=f"{CB_FIXED_BUTTONS_DELETE}{btn['id']}"
+            )
+        )
+        rows.append(btn_row)
+
+    rows.append([InlineKeyboardButton("➕ Add Button", callback_data=CB_FIXED_BUTTONS_ADD)])
+    rows.append([InlineKeyboardButton("« Back", callback_data=CB_INLINE_BUTTONS)])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _move_fixed_button(db: Database, button_id: int, direction: int) -> None:
+    """Move a fixed button up or down by swapping sort_order with neighbor."""
+    buttons = db.list_fixed_buttons()
+    button_index = None
+    for i, btn in enumerate(buttons):
+        if btn["id"] == button_id:
+            button_index = i
+            break
+
+    if button_index is None:
+        return
+
+    target_index = button_index + direction
+    if target_index < 0 or target_index >= len(buttons):
+        return
+
+    # Swap sort_order
+    current_btn = buttons[button_index]
+    target_btn = buttons[target_index]
+    current_order = current_btn["sort_order"]
+    target_order = target_btn["sort_order"]
+
+    db.update_fixed_button(button_id, sort_order=target_order)
+    db.update_fixed_button(target_btn["id"], sort_order=current_order)
 
 
 def _ai_mode_label(mode: str) -> str:
@@ -735,6 +923,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return AWAIT_CUSTOM_IMAGE_POST
 
+    if data == CB_INLINE_BUTTONS:
+        await _safe_edit_message_text(
+            query,
+            await _inline_buttons_menu_text(db),
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
     if data == CB_AI:
         await _safe_edit_message_text(
             query,
@@ -885,6 +1082,233 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             query,
             _coupon_detection_menu_text(db),
             reply_markup=_coupon_detection_keyboard(),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    # Inline Buttons handlers
+    if data == CB_PRODUCT_BUTTONS_TOGGLE:
+        current = db.get_product_buttons_enabled()
+        db.set_product_buttons_enabled(not current)
+        await _safe_edit_message_text(
+            query,
+            await _inline_buttons_menu_text(db),
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_FIXED_BUTTONS_LIST:
+        await _safe_edit_message_text(
+            query,
+            await _fixed_buttons_list_text(db),
+            reply_markup=_fixed_buttons_list_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_FIXED_BUTTONS_ADD:
+        context.user_data["adding_fixed_button"] = True
+        await _safe_edit_message_text(
+            query,
+            "➕ <b>Add Fixed Button</b>\n\n"
+            "Send the button title:\n"
+            "Example: 🔥 جميع العروض\n\n"
+            "/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return AWAIT_FIXED_BUTTON_TITLE
+
+    if data.startswith(CB_FIXED_BUTTONS_EDIT):
+        button_id = int(data.split(":")[-1])
+        button = db.get_fixed_button(button_id)
+        if button:
+            context.user_data["editing_fixed_button_id"] = button_id
+            await _safe_edit_message_text(
+                query,
+                f"✏️ <b>Edit Fixed Button</b>\n\n"
+                f"Current title: {button['title']}\n"
+                f"Current URL: {button['url']}\n\n"
+                f"Send new button title (or /cancel to abort):",
+                parse_mode="HTML",
+            )
+            return AWAIT_FIXED_BUTTON_TITLE
+        else:
+            await _safe_edit_message_text(
+                query,
+                "Button not found.",
+                reply_markup=_inline_buttons_keyboard(db),
+                parse_mode="HTML",
+            )
+            return ConversationHandler.END
+
+    if data.startswith(CB_FIXED_BUTTONS_DELETE):
+        button_id = int(data.split(":")[-1])
+        if db.delete_fixed_button(button_id):
+            await _safe_edit_message_text(
+                query,
+                "✅ Button deleted.",
+                reply_markup=_inline_buttons_keyboard(db),
+                parse_mode="HTML",
+            )
+        else:
+            await _safe_edit_message_text(
+                query,
+                "Failed to delete button.",
+                reply_markup=_inline_buttons_keyboard(db),
+                parse_mode="HTML",
+            )
+        return ConversationHandler.END
+
+    if data.startswith(CB_FIXED_BUTTONS_ENABLE):
+        button_id = int(data.split(":")[-1])
+        db.update_fixed_button(button_id, enabled=True)
+        await _safe_edit_message_text(
+            query,
+            await _fixed_buttons_list_text(db),
+            reply_markup=_fixed_buttons_list_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data.startswith(CB_FIXED_BUTTONS_DISABLE):
+        button_id = int(data.split(":")[-1])
+        db.update_fixed_button(button_id, enabled=False)
+        await _safe_edit_message_text(
+            query,
+            await _fixed_buttons_list_text(db),
+            reply_markup=_fixed_buttons_list_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data.startswith(CB_FIXED_BUTTONS_UP):
+        button_id = int(data.split(":")[-1])
+        await _move_fixed_button(db, button_id, -1)
+        await _safe_edit_message_text(
+            query,
+            await _fixed_buttons_list_text(db),
+            reply_markup=_fixed_buttons_list_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data.startswith(CB_FIXED_BUTTONS_DOWN):
+        button_id = int(data.split(":")[-1])
+        await _move_fixed_button(db, button_id, 1)
+        await _safe_edit_message_text(
+            query,
+            await _fixed_buttons_list_text(db),
+            reply_markup=_fixed_buttons_list_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_FIXED_POSITION_TOP:
+        db.set_fixed_buttons_position("TOP")
+        await _safe_edit_message_text(
+            query,
+            await _inline_buttons_menu_text(db),
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_FIXED_POSITION_BOTTOM:
+        db.set_fixed_buttons_position("BOTTOM")
+        await _safe_edit_message_text(
+            query,
+            await _inline_buttons_menu_text(db),
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_PRODUCT_LAYOUT_VERTICAL:
+        db.set_product_button_layout("VERTICAL")
+        await _safe_edit_message_text(
+            query,
+            await _inline_buttons_menu_text(db),
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_PRODUCT_LAYOUT_TWO_COLUMNS:
+        db.set_product_button_layout("TWO_COLUMNS")
+        await _safe_edit_message_text(
+            query,
+            await _inline_buttons_menu_text(db),
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_PRODUCT_TEMPLATE_SET:
+        context.user_data["setting_product_template"] = True
+        await _safe_edit_message_text(
+            query,
+            "📝 <b>Set Product Button Template</b>\n\n"
+            "Current template:\n"
+            f"{db.get_product_button_template()}\n\n"
+            "Send new template.\n"
+            "Use {name} as placeholder for product name.\n\n"
+            "Examples:\n"
+            "🛒 شراء {name}\n"
+            "🔥 {name}\n"
+            "💰 اشتري {name}\n"
+            "{name}\n\n"
+            "/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return AWAIT_FIXED_BUTTON_TITLE  # Reuse existing state for text input
+
+    if data == CB_MAX_PRODUCT_1:
+        db.set_max_product_buttons(1)
+        await _safe_edit_message_text(
+            query,
+            await _inline_buttons_menu_text(db),
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_MAX_PRODUCT_2:
+        db.set_max_product_buttons(2)
+        await _safe_edit_message_text(
+            query,
+            await _inline_buttons_menu_text(db),
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_MAX_PRODUCT_3:
+        db.set_max_product_buttons(3)
+        await _safe_edit_message_text(
+            query,
+            await _inline_buttons_menu_text(db),
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_MAX_PRODUCT_4:
+        db.set_max_product_buttons(4)
+        await _safe_edit_message_text(
+            query,
+            await _inline_buttons_menu_text(db),
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_MAX_PRODUCT_5:
+        db.set_max_product_buttons(5)
+        await _safe_edit_message_text(
+            query,
+            await _inline_buttons_menu_text(db),
+            reply_markup=_inline_buttons_keyboard(db),
             parse_mode="HTML",
         )
         return ConversationHandler.END
@@ -1047,6 +1471,102 @@ async def receive_affiliate_tag_value(
         parse_mode="HTML",
         reply_markup=_affiliate_tag_keyboard(db),
     )
+    return ConversationHandler.END
+
+
+async def receive_fixed_button_title(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
+
+    msg = update.message
+    text = (msg.text or "").strip()
+
+    # Check if this is for setting product template
+    if context.user_data.pop("setting_product_template", False):
+        db = _db(context)
+        db.set_product_button_template(text)
+        await msg.reply_text(
+            "✅ Product button template saved.",
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    # Original fixed button title handling
+    if not text:
+        await msg.reply_text("Title cannot be empty. Try again or /cancel.")
+        return AWAIT_FIXED_BUTTON_TITLE
+
+    context.user_data["fixed_button_title"] = text
+    await msg.reply_text(
+        "Now send the button URL:\n"
+        "Example: https://t.me/loqtabgd\n\n"
+        "/cancel to abort.",
+    )
+    return AWAIT_FIXED_BUTTON_URL
+
+
+async def receive_fixed_button_url(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
+
+    msg = update.message
+    url = (msg.text or "").strip()
+    if not url:
+        await msg.reply_text("URL cannot be empty. Try again or /cancel.")
+        return AWAIT_FIXED_BUTTON_URL
+
+    # Validate URL
+    if not url.startswith("https://"):
+        await msg.reply_text(
+            "❌ Invalid URL.\n\n"
+            "URL must start with https://\n"
+            "Example: https://t.me/loqtabgd\n\n"
+            "Try again or /cancel.",
+        )
+        return AWAIT_FIXED_BUTTON_URL
+
+    title = context.user_data.pop("fixed_button_title", "")
+    if not title:
+        await msg.reply_text("Error: Title lost. Please start over.")
+        return ConversationHandler.END
+
+    # Validate title length
+    if len(title) > 64:
+        await msg.reply_text(
+            f"❌ Title too long.\n\n"
+            f"Title must be 64 characters or less.\n"
+            f"Current length: {len(title)}\n\n"
+            f"Try again or /cancel.",
+        )
+        return AWAIT_FIXED_BUTTON_URL
+
+    db = _db(context)
+
+    # Check if editing or adding
+    editing_id = context.user_data.pop("editing_fixed_button_id", None)
+    if editing_id:
+        db.update_fixed_button(editing_id, title=title, url=url)
+        await msg.reply_text(
+            "✅ Button updated.",
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+    else:
+        # Get max sort_order for new button
+        buttons = db.list_fixed_buttons()
+        max_order = max((b["sort_order"] for b in buttons), default=-1)
+        db.create_fixed_button(title, url, sort_order=max_order + 1)
+        await msg.reply_text(
+            "✅ Button added.",
+            reply_markup=_inline_buttons_keyboard(db),
+            parse_mode="HTML",
+        )
+
     return ConversationHandler.END
 
 
@@ -1228,6 +1748,18 @@ def build_admin_handlers() -> list:
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND & admin_filter,
                     receive_affiliate_tag_value,
+                ),
+            ],
+            AWAIT_FIXED_BUTTON_TITLE: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & admin_filter,
+                    receive_fixed_button_title,
+                ),
+            ],
+            AWAIT_FIXED_BUTTON_URL: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & admin_filter,
+                    receive_fixed_button_url,
                 ),
             ],
             **manual_states,

@@ -24,8 +24,12 @@ from image_processor import apply_frame_top_aligned
 from link_resolver import extract_all_urls_from_text, is_amazon_url
 from database import Database
 from file_cleanup import cleanup_files
-from telegram_publisher import publish_to_channel
+from telegram_publisher import (
+    publish_to_channel_with_overflow,
+    SAFE_CAPTION_LENGTH,
+)
 from upload_prep import prepare_channel_upload
+from inline_buttons import build_inline_keyboard
 import time
 
 UD_EDITING_DRAFT = "editing_draft_id"
@@ -187,15 +191,59 @@ async def receive_custom_image_post(
     
     try:
         publish_path, publish_temp = prepare_channel_upload(draft["image_path"])
-        await msg.reply_photo(
-            photo=publish_path,
-            caption=build_preview_caption(draft),
-            parse_mode="HTML",
-            reply_markup=custom_image_preview_keyboard(draft_id),
+
+        # Build inline keyboard for fixed buttons (custom image posts have no product buttons)
+        fixed_buttons = db.list_fixed_buttons(enabled_only=True)
+        fixed_position = db.get_fixed_buttons_position()
+        max_product_buttons = db.get_max_product_buttons()
+        inline_keyboard = build_inline_keyboard(
+            [], fixed_buttons, product_buttons_enabled=False,
+            fixed_buttons_position=fixed_position,
+            max_product_buttons=max_product_buttons,
         )
+
+        # Combine with custom image preview keyboard (separate sections)
+        preview_keyboard = custom_image_preview_keyboard(draft_id)
+        if inline_keyboard.inline_keyboard:
+            merged_rows = list(preview_keyboard.inline_keyboard) + [
+                [InlineKeyboardButton("─" * 20, callback_data="preview_separator")]
+            ] + list(inline_keyboard.inline_keyboard)
+            merged_keyboard = InlineKeyboardMarkup(merged_rows)
+        else:
+            merged_keyboard = preview_keyboard
+
+        # Handle caption overflow for preview
+        caption = build_preview_caption(draft)
+        caption_length = len(caption)
+        if caption_length > SAFE_CAPTION_LENGTH:
+            # Send photo with short caption
+            short_caption = (
+                "🔥 أفضل عروض اليوم\n\n"
+                "📦 يحتوي هذا المنشور على صورة مخصصة.\n"
+                "⬇️ التفاصيل الكاملة في الرسالة التالية."
+            )
+            await msg.reply_photo(
+                photo=publish_path,
+                caption=short_caption,
+                parse_mode="HTML",
+                reply_markup=merged_keyboard,
+            )
+            # Send full caption as text message
+            await msg.reply_text(
+                caption,
+                parse_mode="HTML",
+            )
+        else:
+            # Normal mode - send photo with full caption
+            await msg.reply_photo(
+                photo=publish_path,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=merged_keyboard,
+            )
         if publish_temp and publish_path != draft["image_path"]:
             cleanup_files([publish_path])
-        
+
         context.user_data[UD_CUSTOM_IMAGE_DRAFT] = draft_id
     except Exception as exc:
         logger.exception("CUSTOM IMAGE POST PREVIEW FAILED")
@@ -230,11 +278,25 @@ async def handle_custom_publish(
     
     try:
         publish_path, publish_temp = prepare_channel_upload(draft["image_path"])
-        await publish_to_channel(
+
+        # Build inline keyboard for fixed buttons (custom image posts have no product buttons)
+        fixed_buttons = db.list_fixed_buttons(enabled_only=True)
+        fixed_position = db.get_fixed_buttons_position()
+        max_product_buttons = db.get_max_product_buttons()
+        inline_keyboard = build_inline_keyboard(
+            [], fixed_buttons, product_buttons_enabled=False,
+            fixed_buttons_position=fixed_position,
+            max_product_buttons=max_product_buttons,
+        )
+
+        await publish_to_channel_with_overflow(
             context.application.bot,
             destination_id,
             publish_path,
             draft["caption"],
+            reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
+            product_count=0,  # Custom image posts have no products
+            parse_mode="HTML",
         )
         
         db.set_draft_status(draft_id, "published")

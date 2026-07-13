@@ -31,9 +31,14 @@ from link_resolver import (
 from ai_caption import build_product_caption
 from creators_title import resolve_frame_title
 from image_processor import CreatorsProductCard, apply_frame_creators_products
-from telegram_publisher import build_caption, publish_to_channel
+from telegram_publisher import (
+    build_caption,
+    publish_to_channel_with_overflow,
+    SAFE_CAPTION_LENGTH,
+)
 from upload_prep import prepare_channel_upload
 from coupon_price import coupon_apply_kwargs_from_product, normalize_caption_price_line
+from inline_buttons import build_inline_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,29 @@ CB_CANCEL = "cancel_draft:"
 UD_EDITING_DRAFT = "editing_draft_id"
 UD_MANUAL_MODE = "manual_mode"
 _COMPOSITE_MAX_PRODUCTS = 6
+
+
+def _extract_products_from_draft(draft: dict) -> list[dict]:
+    """
+    Extract product list from draft for inline button generation.
+
+    For single product drafts: extract from asin, title, clean_url
+    For composite drafts: parse asins and titles from combined format
+    """
+    asins = draft.get("asin", "")
+    title = draft.get("title", "")
+    clean_url = draft.get("clean_url", "")
+
+    # Check if this is a composite draft (multiple ASNs separated by comma)
+    if "," in asins:
+        asin_list = [a.strip() for a in asins.split(",")]
+        title_list = [t.strip() for t in title.split(" | ")]
+        return [
+            {"title": t, "url": clean_url} for t in title_list
+        ]
+    else:
+        # Single product draft
+        return [{"title": title, "url": clean_url}]
 
 
 def is_admin(user_id: int | None) -> bool:
@@ -408,14 +436,73 @@ async def send_draft_preview(
 ) -> None:
     duplicate = _is_duplicate_draft(db, draft)
     caption = build_preview_caption(draft, duplicate=duplicate)
-    with open(draft["image_path"], "rb") as photo:
-        await bot.send_photo(
+
+    # Build inline keyboard for product buttons and fixed buttons (user-facing)
+    products = _extract_products_from_draft(draft)
+    fixed_buttons = db.list_fixed_buttons(enabled_only=True)
+    product_buttons_enabled = db.get_product_buttons_enabled()
+    fixed_position = db.get_fixed_buttons_position()
+    product_layout = db.get_product_button_layout()
+    product_template = db.get_product_button_template()
+    max_product_buttons = db.get_max_product_buttons()
+
+    user_keyboard = build_inline_keyboard(
+        products,
+        fixed_buttons,
+        product_buttons_enabled,
+        fixed_buttons_position=fixed_position,
+        product_button_layout=product_layout,
+        product_button_template=product_template,
+        max_product_buttons=max_product_buttons,
+    )
+
+    # Build admin action keyboard (separate section)
+    admin_keyboard = draft_preview_keyboard(draft["id"])
+
+    # Combine: admin actions first, then separator, then user keyboard
+    if user_keyboard.inline_keyboard:
+        merged_rows = list(admin_keyboard.inline_keyboard) + [
+            [InlineKeyboardButton("─" * 20, callback_data="preview_separator")]
+        ] + list(user_keyboard.inline_keyboard)
+        merged_keyboard = InlineKeyboardMarkup(merged_rows)
+    else:
+        merged_keyboard = admin_keyboard
+
+    # Handle caption overflow for preview
+    caption_length = len(caption)
+    if caption_length > SAFE_CAPTION_LENGTH:
+        # Send photo with short caption
+        products = _extract_products_from_draft(draft)
+        product_count = len(products)
+        short_caption = (
+            "🔥 أفضل عروض اليوم\n\n"
+            f"📦 يحتوي هذا المنشور على {product_count} منتجات.\n"
+            "⬇️ التفاصيل الكاملة وروابط الشراء في الرسالة التالية."
+        )
+        with open(draft["image_path"], "rb") as photo:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=short_caption,
+                reply_markup=merged_keyboard,
+                parse_mode="HTML",
+            )
+        # Send full caption as text message
+        await bot.send_message(
             chat_id=chat_id,
-            photo=photo,
-            caption=caption,
-            reply_markup=draft_preview_keyboard(draft["id"]),
+            text=caption,
             parse_mode="HTML",
         )
+    else:
+        # Normal mode - send photo with full caption
+        with open(draft["image_path"], "rb") as photo:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=caption,
+                reply_markup=merged_keyboard,
+                parse_mode="HTML",
+            )
 
 
 async def process_manual_text(
@@ -604,11 +691,37 @@ async def handle_publish_draft(
                 debug_path="publish_draft",
                 list_price_text=draft.get("list_price"),
             )
-        sent = await publish_to_channel(
+
+        # Build inline keyboard for product buttons and fixed buttons
+        products = _extract_products_from_draft(draft)
+        fixed_buttons = db.list_fixed_buttons(enabled_only=True)
+        product_buttons_enabled = db.get_product_buttons_enabled()
+        fixed_position = db.get_fixed_buttons_position()
+        product_layout = db.get_product_button_layout()
+        product_template = db.get_product_button_template()
+        max_product_buttons = db.get_max_product_buttons()
+        inline_keyboard = build_inline_keyboard(
+            products,
+            fixed_buttons,
+            product_buttons_enabled,
+            fixed_buttons_position=fixed_position,
+            product_button_layout=product_layout,
+            product_button_template=product_template,
+            max_product_buttons=max_product_buttons,
+        )
+
+        # Determine product count for overflow caption
+        products = _extract_products_from_draft(draft)
+        product_count = len(products)
+
+        sent = await publish_to_channel_with_overflow(
             context.application.bot,
             destination_id,
             publish_path,
             caption,
+            reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
+            product_count=product_count,
+            parse_mode="HTML",
         )
         for asin in draft_asins:
             db.add_published_product(

@@ -48,9 +48,10 @@ from link_resolver import (
 )
 from telegram_listener import start_telethon_listener, stop_telethon_listener
 from ai_caption import build_product_caption
-from telegram_publisher import build_caption, publish_to_channel
+from telegram_publisher import build_caption, publish_to_channel_with_overflow
 from upload_prep import to_jpeg_for_telegram
 from backup_restore import maybe_notify_restore_complete
+from inline_buttons import build_inline_keyboard
 
 logging.basicConfig(
     level=logging.INFO,
@@ -186,11 +187,32 @@ async def process_single_url(
             )
             return False
 
-        sent = await publish_to_channel(
+        # Build inline keyboard for product buttons and fixed buttons
+        products = [{"title": product["title"], "url": display_url}]
+        fixed_buttons = db.list_fixed_buttons(enabled_only=True)
+        product_buttons_enabled = db.get_product_buttons_enabled()
+        fixed_position = db.get_fixed_buttons_position()
+        product_layout = db.get_product_button_layout()
+        product_template = db.get_product_button_template()
+        max_product_buttons = db.get_max_product_buttons()
+        inline_keyboard = build_inline_keyboard(
+            products,
+            fixed_buttons,
+            product_buttons_enabled,
+            fixed_buttons_position=fixed_position,
+            product_button_layout=product_layout,
+            product_button_template=product_template,
+            max_product_buttons=max_product_buttons,
+        )
+
+        sent = await publish_to_channel_with_overflow(
             application.bot,
             destination_id,
             upload_image,
             caption,
+            reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
+            product_count=1,
+            parse_mode="HTML",
         )
         db.add_published_product(
             asin,
