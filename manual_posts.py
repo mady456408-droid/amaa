@@ -470,6 +470,14 @@ async def send_draft_preview(
 
     # Handle caption overflow for preview
     caption_length = len(caption)
+    logger.info(
+        "CAPTION DEBUG: length=%d limit=%d mode=%s first_100_chars=%s",
+        caption_length,
+        SAFE_CAPTION_LENGTH,
+        "normal" if caption_length <= SAFE_CAPTION_LENGTH else "overflow",
+        caption[:100],
+    )
+
     if caption_length > SAFE_CAPTION_LENGTH:
         # Send photo with short caption
         products = _extract_products_from_draft(draft)
@@ -478,6 +486,10 @@ async def send_draft_preview(
             "🔥 أفضل عروض اليوم\n\n"
             f"📦 يحتوي هذا المنشور على {product_count} منتجات.\n"
             "⬇️ التفاصيل الكاملة وروابط الشراء في الرسالة التالية."
+        )
+        logger.info(
+            "CAPTION DEBUG: sending photo with short_caption length=%d",
+            len(short_caption),
         )
         with open(draft["image_path"], "rb") as photo:
             await bot.send_photo(
@@ -488,6 +500,10 @@ async def send_draft_preview(
                 parse_mode="HTML",
             )
         # Send full caption as text message
+        logger.info(
+            "CAPTION DEBUG: sending full caption as text message length=%d",
+            caption_length,
+        )
         await bot.send_message(
             chat_id=chat_id,
             text=caption,
@@ -495,6 +511,7 @@ async def send_draft_preview(
         )
     else:
         # Normal mode - send photo with full caption
+        logger.info("CAPTION: length=%d mode=normal", caption_length)
         with open(draft["image_path"], "rb") as photo:
             await bot.send_photo(
                 chat_id=chat_id,

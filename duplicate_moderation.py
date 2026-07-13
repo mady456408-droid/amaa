@@ -6,7 +6,7 @@ from telegram.ext import CallbackQueryHandler, ContextTypes
 
 from config import ADMIN_USER_IDS, APPROVAL_TIMEOUT_MINUTES, LAST_PUBLISHED_LOOKBACK, AMAZON_DOMAIN
 from database import Database
-from telegram_publisher import publish_to_channel
+from telegram_publisher import publish_to_channel_with_overflow
 from file_cleanup import cleanup_files
 from upload_prep import prepare_channel_upload
 from affiliate_tag import apply_affiliate_tag
@@ -132,11 +132,13 @@ async def publish_and_record(
             list_price_text=pending.get("list_price"),
         )
 
-    sent = await publish_to_channel(
+    sent = await publish_to_channel_with_overflow(
         application.bot,
         destination_id,
         publish_path,
         caption,
+        product_count=1,
+        parse_mode="HTML",
     )
     db.add_published_product(
         pending["asin"],

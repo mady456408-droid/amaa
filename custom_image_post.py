@@ -215,12 +215,24 @@ async def receive_custom_image_post(
         # Handle caption overflow for preview
         caption = build_preview_caption(draft)
         caption_length = len(caption)
+        logger.info(
+            "CAPTION DEBUG: length=%d limit=%d mode=%s first_100_chars=%s",
+            caption_length,
+            SAFE_CAPTION_LENGTH,
+            "normal" if caption_length <= SAFE_CAPTION_LENGTH else "overflow",
+            caption[:100],
+        )
+
         if caption_length > SAFE_CAPTION_LENGTH:
             # Send photo with short caption
             short_caption = (
                 "🔥 أفضل عروض اليوم\n\n"
                 "📦 يحتوي هذا المنشور على صورة مخصصة.\n"
                 "⬇️ التفاصيل الكاملة في الرسالة التالية."
+            )
+            logger.info(
+                "CAPTION DEBUG: sending photo with short_caption length=%d",
+                len(short_caption),
             )
             await msg.reply_photo(
                 photo=publish_path,
@@ -229,12 +241,17 @@ async def receive_custom_image_post(
                 reply_markup=merged_keyboard,
             )
             # Send full caption as text message
+            logger.info(
+                "CAPTION DEBUG: sending full caption as text message length=%d",
+                caption_length,
+            )
             await msg.reply_text(
                 caption,
                 parse_mode="HTML",
             )
         else:
             # Normal mode - send photo with full caption
+            logger.info("CAPTION: length=%d mode=normal", caption_length)
             await msg.reply_photo(
                 photo=publish_path,
                 caption=caption,

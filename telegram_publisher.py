@@ -127,33 +127,78 @@ async def publish_to_channel_with_overflow(
         The photo message object
     """
     caption_length = len(caption)
+    overflow_triggered = caption_length > SAFE_CAPTION_LENGTH
 
-    if caption_length <= SAFE_CAPTION_LENGTH:
+    if overflow_triggered:
+        # Overflow mode
+        short_caption = build_overflow_caption(product_count)
+        photo_caption_length = len(short_caption)
+        message_caption_length = caption_length
+
+        logger.info(
+            "CAPTION DEBUG:\n"
+            "length=%d\n"
+            "safe_limit=%d\n"
+            "overflow_triggered=True\n"
+            "product_count=%d\n"
+            "photo_caption_length=%d\n"
+            "message_caption_length=%d\n"
+            "photo_caption_first_50=%s\n"
+            "photo_caption_last_50=%s",
+            caption_length,
+            SAFE_CAPTION_LENGTH,
+            product_count,
+            photo_caption_length,
+            message_caption_length,
+            short_caption[:50],
+            short_caption[-50:] if len(short_caption) >= 50 else short_caption,
+        )
+
+        logger.info(
+            "CAPTION OVERFLOW: length=%d mode=split products=%d",
+            caption_length,
+            product_count,
+        )
+
+        # Send photo with short caption and inline keyboard
+        photo_msg = await publish_to_channel(
+            bot, channel_id, photo_path, short_caption, reply_markup
+        )
+
+        # Send full caption as text message (no buttons)
+        await bot.send_message(
+            chat_id=channel_id,
+            text=caption,
+            parse_mode=parse_mode,
+            read_timeout=TELEGRAM_READ_TIMEOUT,
+            write_timeout=TELEGRAM_WRITE_TIMEOUT,
+        )
+
+        return photo_msg
+    else:
+        # Normal mode
+        photo_caption_length = caption_length
+        message_caption_length = 0
+
+        logger.info(
+            "CAPTION DEBUG:\n"
+            "length=%d\n"
+            "safe_limit=%d\n"
+            "overflow_triggered=False\n"
+            "product_count=%d\n"
+            "photo_caption_length=%d\n"
+            "message_caption_length=0\n"
+            "photo_caption_first_50=%s\n"
+            "photo_caption_last_50=%s",
+            caption_length,
+            SAFE_CAPTION_LENGTH,
+            product_count,
+            photo_caption_length,
+            caption[:50],
+            caption[-50:] if len(caption) >= 50 else caption,
+        )
+
         logger.info("CAPTION: length=%d mode=normal", caption_length)
         return await publish_to_channel(
             bot, channel_id, photo_path, caption, reply_markup
         )
-
-    # Overflow mode
-    logger.info(
-        "CAPTION OVERFLOW: length=%d mode=split products=%d",
-        caption_length,
-        product_count,
-    )
-
-    # Send photo with short caption and inline keyboard
-    short_caption = build_overflow_caption(product_count)
-    photo_msg = await publish_to_channel(
-        bot, channel_id, photo_path, short_caption, reply_markup
-    )
-
-    # Send full caption as text message (no buttons)
-    await bot.send_message(
-        chat_id=channel_id,
-        text=caption,
-        parse_mode=parse_mode,
-        read_timeout=TELEGRAM_READ_TIMEOUT,
-        write_timeout=TELEGRAM_WRITE_TIMEOUT,
-    )
-
-    return photo_msg
