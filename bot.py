@@ -211,7 +211,7 @@ async def process_single_url(
             upload_image,
             caption,
             reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
-            product_count=1,
+            products=products,
             parse_mode="HTML",
         )
         db.add_published_product(

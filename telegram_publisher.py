@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Any
 
 import httpx
 from telegram import Bot, Message
@@ -11,6 +12,7 @@ from config import (
     TELEGRAM_WRITE_TIMEOUT,
 )
 from coupon_price import format_standard_price_line
+from inline_buttons import short_product_name
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,38 @@ def build_overflow_caption(product_count: int = 1) -> str:
         f"📦 يحتوي هذا المنشور على {product_count} منتجات.\n"
         "⬇️ التفاصيل الكاملة وروابط الشراء في الرسالة التالية."
     )
+
+
+def build_compact_product_summary(products: list[dict[str, Any]]) -> str:
+    """
+    Build compact product summary for overflow mode.
+
+    Args:
+        products: List of product dicts with 'title', 'url', and optionally 'price'
+
+    Returns:
+        Compact product summary with short names and affiliate links
+    """
+    if not products:
+        return "📦 No products in this post"
+
+    lines = ["🛍 عرض على\n"]
+
+    for idx, product in enumerate(products, 1):
+        title = product.get("title", "")
+        url = product.get("url", "")
+        price = product.get("price")
+
+        short_name = short_product_name(title)
+        lines.append(f"{idx}️⃣ {short_name}")
+        lines.append(f"🔗 {url}")
+
+        if price and price != "Not found":
+            lines.append(f"💰 {price}")
+
+        lines.append("")  # Empty line between products
+
+    return "\n".join(lines).strip()
 
 
 async def publish_to_channel(
@@ -104,7 +138,7 @@ async def publish_to_channel_with_overflow(
     photo_path: str,
     caption: str,
     reply_markup=None,
-    product_count: int = 1,
+    products: list[dict[str, Any]] | None = None,
     parse_mode: str = "HTML",
 ) -> Message:
     """
@@ -112,7 +146,7 @@ async def publish_to_channel_with_overflow(
 
     If caption exceeds SAFE_CAPTION_LENGTH, splits into two messages:
     1. Photo with short overflow caption + inline keyboard
-    2. Text message with full caption (no buttons)
+    2. Text message with compact product summary (no buttons)
 
     Args:
         bot: Telegram bot instance
@@ -120,7 +154,7 @@ async def publish_to_channel_with_overflow(
         photo_path: Path to photo file
         caption: Full caption to send
         reply_markup: Inline keyboard for photo message
-        product_count: Number of products (for overflow caption)
+        products: List of product dicts for compact summary in overflow mode
         parse_mode: Parse mode for text message (HTML/Markdown)
 
     Returns:
@@ -128,12 +162,20 @@ async def publish_to_channel_with_overflow(
     """
     caption_length = len(caption)
     overflow_triggered = caption_length > SAFE_CAPTION_LENGTH
+    product_count = len(products) if products else 1
 
     if overflow_triggered:
         # Overflow mode
         short_caption = build_overflow_caption(product_count)
         photo_caption_length = len(short_caption)
-        message_caption_length = caption_length
+
+        # Build compact product summary
+        if products:
+            message_text = build_compact_product_summary(products)
+        else:
+            message_text = caption  # Fallback to full caption if no products
+
+        message_caption_length = len(message_text)
 
         logger.info(
             "CAPTION DEBUG:\n"
@@ -165,10 +207,10 @@ async def publish_to_channel_with_overflow(
             bot, channel_id, photo_path, short_caption, reply_markup
         )
 
-        # Send full caption as text message (no buttons)
+        # Send compact product summary as text message (no buttons)
         await bot.send_message(
             chat_id=channel_id,
-            text=caption,
+            text=message_text,
             parse_mode=parse_mode,
             read_timeout=TELEGRAM_READ_TIMEOUT,
             write_timeout=TELEGRAM_WRITE_TIMEOUT,

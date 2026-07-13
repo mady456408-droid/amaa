@@ -132,12 +132,21 @@ async def publish_and_record(
             list_price_text=pending.get("list_price"),
         )
 
+    # Build product list for overflow summary
+    products = [
+        {
+            "title": pending["title"],
+            "url": pending.get("clean_url", ""),
+            "price": pending.get("price"),
+        }
+    ]
+
     sent = await publish_to_channel_with_overflow(
         application.bot,
         destination_id,
         publish_path,
         caption,
-        product_count=1,
+        products=products,
         parse_mode="HTML",
     )
     db.add_published_product(

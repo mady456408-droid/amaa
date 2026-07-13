@@ -240,13 +240,13 @@ async def receive_custom_image_post(
                 parse_mode="HTML",
                 reply_markup=merged_keyboard,
             )
-            # Send full caption as text message
+            # Send simple message for custom image post (no products to summarize)
             logger.info(
-                "CAPTION DEBUG: sending full caption as text message length=%d",
-                caption_length,
+                "CAPTION DEBUG: sending simple message for custom image post",
             )
             await msg.reply_text(
-                caption,
+                "📦 Custom Image Post\n\n"
+                "⬇️ Full caption in the photo above.",
                 parse_mode="HTML",
             )
         else:

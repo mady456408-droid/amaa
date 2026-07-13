@@ -35,6 +35,7 @@ from telegram_publisher import (
     build_caption,
     publish_to_channel_with_overflow,
     SAFE_CAPTION_LENGTH,
+    build_compact_product_summary,
 )
 from upload_prep import prepare_channel_upload
 from coupon_price import coupon_apply_kwargs_from_product, normalize_caption_price_line
@@ -499,14 +500,15 @@ async def send_draft_preview(
                 reply_markup=merged_keyboard,
                 parse_mode="HTML",
             )
-        # Send full caption as text message
+        # Send compact product summary as text message
+        compact_summary = build_compact_product_summary(products)
         logger.info(
-            "CAPTION DEBUG: sending full caption as text message length=%d",
-            caption_length,
+            "CAPTION DEBUG: sending compact product summary length=%d",
+            len(compact_summary),
         )
         await bot.send_message(
             chat_id=chat_id,
-            text=caption,
+            text=compact_summary,
             parse_mode="HTML",
         )
     else:
@@ -727,9 +729,8 @@ async def handle_publish_draft(
             max_product_buttons=max_product_buttons,
         )
 
-        # Determine product count for overflow caption
+        # Determine products for overflow summary
         products = _extract_products_from_draft(draft)
-        product_count = len(products)
 
         sent = await publish_to_channel_with_overflow(
             context.application.bot,
@@ -737,7 +738,7 @@ async def handle_publish_draft(
             publish_path,
             caption,
             reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
-            product_count=product_count,
+            products=products,
             parse_mode="HTML",
         )
         for asin in draft_asins:
