@@ -53,6 +53,7 @@ from telegram_publisher import build_caption, publish_to_channel_with_overflow
 from published_price import extract_published_price_fields
 from backup_restore import maybe_notify_restore_complete
 from inline_buttons import build_inline_keyboard
+from upload_prep import to_jpeg_for_telegram
 
 logging.basicConfig(
     level=logging.INFO,
