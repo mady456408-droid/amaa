@@ -19,6 +19,7 @@ SETTING_FIXED_BUTTONS_POSITION = "fixed_buttons_position"
 SETTING_PRODUCT_BUTTON_LAYOUT = "product_button_layout"
 SETTING_PRODUCT_BUTTON_TEMPLATE = "product_button_template"
 SETTING_MAX_PRODUCT_BUTTONS = "max_product_buttons"
+SETTING_MIN_PRICE_DROP = "min_price_drop"
 
 
 class Database:
@@ -120,6 +121,28 @@ class Database:
                 conn.execute("ALTER TABLE draft_posts ADD COLUMN list_price TEXT")
             if "short_title" not in draft_cols:
                 conn.execute("ALTER TABLE draft_posts ADD COLUMN short_title TEXT")
+
+            published_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(published_products)").fetchall()
+            }
+            for col, col_type in (
+                ("published_price", "TEXT"),
+                ("published_price_value", "REAL"),
+                ("published_list_price", "TEXT"),
+                ("published_list_price_value", "REAL"),
+                ("published_currency", "TEXT"),
+                ("last_checked_at", "TEXT"),
+                ("last_price_check", "REAL"),
+                ("previous_channel_id", "INTEGER"),
+                ("previous_message_id", "INTEGER"),
+                ("previous_published_price", "TEXT"),
+                ("previous_published_at", "TEXT"),
+            ):
+                if col not in published_cols:
+                    conn.execute(
+                        f"ALTER TABLE published_products ADD COLUMN {col} {col_type}"
+                    )
 
             conn.execute(
                 """
@@ -377,6 +400,20 @@ class Database:
         clamped = max(1, min(5, count))
         self.set_setting(SETTING_MAX_PRODUCT_BUTTONS, str(clamped))
 
+    def get_min_price_drop(self) -> int:
+        raw = self.get_setting(SETTING_MIN_PRICE_DROP)
+        if raw is None:
+            return 1  # Default
+        try:
+            val = int(raw)
+            return max(1, min(10000, val))  # Clamp between 1 and 10000
+        except ValueError:
+            return 1
+
+    def set_min_price_drop(self, value: int) -> None:
+        clamped = max(1, min(10000, value))
+        self.set_setting(SETTING_MIN_PRICE_DROP, str(clamped))
+
     def get_last_published_asins(self, limit: int = 10) -> set[str]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -398,17 +435,163 @@ class Database:
         title: str,
         source_channel_id: int,
         destination_message_id: int | None,
+        *,
+        published_price: str | None = None,
+        published_price_value: float | None = None,
+        published_list_price: str | None = None,
+        published_list_price_value: float | None = None,
+        published_currency: str | None = None,
+    ) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO published_products
+                    (asin, title, source_channel_id, destination_message_id, published_at,
+                     published_price, published_price_value, published_list_price,
+                     published_list_price_value, published_currency)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    asin.upper(),
+                    title,
+                    source_channel_id,
+                    destination_message_id,
+                    now,
+                    published_price,
+                    published_price_value,
+                    published_list_price,
+                    published_list_price_value,
+                    published_currency,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def get_published_product(self, published_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM published_products WHERE id = ?",
+                (published_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_unique_published_products(self) -> list[dict[str, Any]]:
+        """Most recent published row per unique ASIN."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT p.*
+                FROM published_products p
+                INNER JOIN (
+                    SELECT asin, MAX(published_at) AS max_at
+                    FROM published_products
+                    GROUP BY asin
+                ) latest ON p.asin = latest.asin AND p.published_at = latest.max_at
+                ORDER BY p.published_at DESC
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_published_product_price_check(
+        self,
+        published_id: int,
+        last_price_check: float | None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO published_products
-                    (asin, title, source_channel_id, destination_message_id, published_at)
-                VALUES (?, ?, ?, ?, ?)
+                UPDATE published_products
+                SET last_checked_at = ?, last_price_check = ?
+                WHERE id = ?
                 """,
-                (asin.upper(), title, source_channel_id, destination_message_id, now),
+                (now, last_price_check, published_id),
             )
+            conn.commit()
+
+    def update_published_product_after_republish(
+        self,
+        published_id: int,
+        *,
+        title: str,
+        source_channel_id: int,
+        destination_message_id: int,
+        published_price: str | None,
+        published_price_value: float | None,
+        published_list_price: str | None,
+        published_list_price_value: float | None,
+        published_currency: str | None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            # First, get current values to preserve as previous_*
+            current = conn.execute(
+                "SELECT * FROM published_products WHERE id = ?",
+                (published_id,),
+            ).fetchone()
+            
+            if current:
+                conn.execute(
+                    """
+                    UPDATE published_products
+                    SET previous_channel_id = source_channel_id,
+                        previous_message_id = destination_message_id,
+                        previous_published_price = published_price,
+                        previous_published_at = published_at,
+                        title = ?,
+                        source_channel_id = ?,
+                        destination_message_id = ?,
+                        published_at = ?,
+                        published_price = ?,
+                        published_price_value = ?,
+                        published_list_price = ?,
+                        published_list_price_value = ?,
+                        published_currency = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        title,
+                        source_channel_id,
+                        destination_message_id,
+                        now,
+                        published_price,
+                        published_price_value,
+                        published_list_price,
+                        published_list_price_value,
+                        published_currency,
+                        published_id,
+                    ),
+                )
+            else:
+                # Fallback if record not found (shouldn't happen)
+                conn.execute(
+                    """
+                    UPDATE published_products
+                    SET title = ?,
+                        source_channel_id = ?,
+                        destination_message_id = ?,
+                        published_at = ?,
+                        published_price = ?,
+                        published_price_value = ?,
+                        published_list_price = ?,
+                        published_list_price_value = ?,
+                        published_currency = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        title,
+                        source_channel_id,
+                        destination_message_id,
+                        now,
+                        published_price,
+                        published_price_value,
+                        published_list_price,
+                        published_list_price_value,
+                        published_currency,
+                        published_id,
+                    ),
+                )
             conn.commit()
 
     def create_pending_approval(

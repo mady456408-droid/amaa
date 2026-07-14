@@ -16,7 +16,7 @@ from coupon_price import (
     format_arabic_price_line,
     normalize_caption_price_line,
 )
-from link_resolver import build_clean_url
+from published_price import extract_published_price_fields
 
 logger = logging.getLogger(__name__)
 
@@ -149,11 +149,16 @@ async def publish_and_record(
         products=products,
         parse_mode="HTML",
     )
+    price_fields = extract_published_price_fields(
+        pending.get("price") or "",
+        pending.get("list_price"),
+    )
     db.add_published_product(
         pending["asin"],
         pending["title"],
         pending["source_channel_id"],
         sent.message_id,
+        **price_fields,
     )
     return sent
 

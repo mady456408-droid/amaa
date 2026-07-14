@@ -7,6 +7,7 @@ from telegram import Message
 from telegram.ext import ApplicationBuilder, filters as tg_filters
 
 from admin_dashboard import build_admin_handlers, refresh_runtime_config
+from price_monitoring import build_price_monitoring_handlers
 from amazon_scraper import BrowserManager
 from amazon_shortener import shorten_amazon_url
 from creators_api import init_creators_client, shutdown_creators_client
@@ -49,7 +50,7 @@ from link_resolver import (
 from telegram_listener import start_telethon_listener, stop_telethon_listener
 from ai_caption import build_product_caption
 from telegram_publisher import build_caption, publish_to_channel_with_overflow
-from upload_prep import to_jpeg_for_telegram
+from published_price import extract_published_price_fields
 from backup_restore import maybe_notify_restore_complete
 from inline_buttons import build_inline_keyboard
 
@@ -214,11 +215,16 @@ async def process_single_url(
             products=products,
             parse_mode="HTML",
         )
+        price_fields = extract_published_price_fields(
+            product["price"],
+            product.get("list_price"),
+        )
         db.add_published_product(
             asin,
             product["title"],
             source_channel_id,
             sent.message_id,
+            **price_fields,
         )
         logger.info("PUBLISHED URL %s/%s asin=%s", index, total, asin)
         published_paths = [product["screenshot"], framed_image]
@@ -413,6 +419,8 @@ def main() -> None:
     # active.  Manual post auto-detection lives here so it never hijacks active
     # dashboard workflows (AI prompt, caption edit, login flow, etc.).
     for handler in build_manual_handlers(admin_filter):
+        app.add_handler(handler, group=1)
+    for handler in build_price_monitoring_handlers():
         app.add_handler(handler, group=1)
 
     logger.info("Starting polling (bot API: admin + publish only)")

@@ -40,6 +40,7 @@ from telegram_publisher import (
 from upload_prep import prepare_channel_upload
 from coupon_price import coupon_apply_kwargs_from_product, normalize_caption_price_line
 from inline_buttons import build_inline_keyboard
+from published_price import extract_published_price_fields
 
 logger = logging.getLogger(__name__)
 
@@ -741,12 +742,17 @@ async def handle_publish_draft(
             products=products,
             parse_mode="HTML",
         )
+        price_fields = extract_published_price_fields(
+            draft.get("price") or "",
+            draft.get("list_price"),
+        )
         for asin in draft_asins:
             db.add_published_product(
                 asin,
                 draft["title"],
                 draft["created_by"],
                 sent.message_id,
+                **price_fields,
             )
         if not db.set_draft_status(draft_id, "published"):
             await query.edit_message_caption("Already handled.")

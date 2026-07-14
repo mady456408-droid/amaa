@@ -52,7 +52,7 @@ from telethon_auth import (
     submit_code,
     submit_password,
 )
-from database import Database
+from price_monitoring import run_price_check
 from affiliate_tag import apply_affiliate_tag, is_valid_affiliate_tag, set_affiliate_settings
 from manual_posts import (
     UD_EDITING_DRAFT,
@@ -64,6 +64,7 @@ from custom_image_post import (
     custom_image_state_handlers,
     custom_image_callback_handlers,
 )
+from database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,15 @@ CB_MAX_PRODUCT_2 = "adm:inline_buttons:max_prod:2"
 CB_MAX_PRODUCT_3 = "adm:inline_buttons:max_prod:3"
 CB_MAX_PRODUCT_4 = "adm:inline_buttons:max_prod:4"
 CB_MAX_PRODUCT_5 = "adm:inline_buttons:max_prod:5"
+CB_PRICE_MONITOR = "adm:price_monitor"
+CB_PRICE_CHECK = "adm:price:check"
+CB_MIN_PRICE_DROP_SET = "adm:price:min_drop:set"
+CB_MIN_PRICE_DROP_1 = "adm:price:min_drop:1"
+CB_MIN_PRICE_DROP_5 = "adm:price:min_drop:5"
+CB_MIN_PRICE_DROP_10 = "adm:price:min_drop:10"
+CB_MIN_PRICE_DROP_25 = "adm:price:min_drop:25"
+CB_MIN_PRICE_DROP_50 = "adm:price:min_drop:50"
+CB_MIN_PRICE_DROP_100 = "adm:price:min_drop:100"
 
 UD_PENDING_RESTORE = "pending_restore_zip"
 
@@ -201,11 +211,49 @@ def _main_keyboard(paused: bool, telethon_connected: bool = True) -> InlineKeybo
                 ),
             ],
             [
+                InlineKeyboardButton(
+                    "📊 Price Monitoring",
+                    callback_data=CB_PRICE_MONITOR,
+                ),
+            ],
+            [
                 InlineKeyboardButton("💾 Backup", callback_data=CB_BACKUP),
                 InlineKeyboardButton("♻ Restore Backup", callback_data=CB_RESTORE),
             ],
         ]
     )
+    return InlineKeyboardMarkup(rows)
+
+
+def _price_monitor_keyboard(db: Database) -> InlineKeyboardMarkup:
+    min_drop = db.get_min_price_drop()
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📉 Check Price Drops",
+                    callback_data=CB_PRICE_CHECK,
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"⚙️ Minimum Price Drop: {min_drop} EGP",
+                    callback_data=CB_MIN_PRICE_DROP_SET,
+                ),
+            ],
+            [InlineKeyboardButton("« Back", callback_data=CB_MAIN)],
+        ]
+    )
+
+
+def _min_price_drop_keyboard(current: int) -> InlineKeyboardMarkup:
+    options = [1, 5, 10, 25, 50, 100]
+    rows = []
+    for opt in options:
+        label = f"✓{opt}" if opt == current else str(opt)
+        callback = globals()[f"CB_MIN_PRICE_DROP_{opt}"]
+        rows.append([InlineKeyboardButton(label, callback_data=callback)])
+    rows.append([InlineKeyboardButton("« Back", callback_data=CB_PRICE_MONITOR)])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1311,6 +1359,48 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             reply_markup=_inline_buttons_keyboard(db),
             parse_mode="HTML",
         )
+        return ConversationHandler.END
+
+    if data == CB_PRICE_MONITOR:
+        await _safe_edit_message_text(
+            query,
+            "📊 <b>Price Monitoring</b>\n\n"
+            "Check published products for price drops.",
+            reply_markup=_price_monitor_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_MIN_PRICE_DROP_SET:
+        min_drop = db.get_min_price_drop()
+        await _safe_edit_message_text(
+            query,
+            f"⚙️ <b>Minimum Price Drop</b>\n\n"
+            f"Current: <b>{min_drop} EGP</b>\n\n"
+            "Products with price drops smaller than this amount will be ignored.",
+            reply_markup=_min_price_drop_keyboard(min_drop),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data.startswith(CB_MIN_PRICE_DROP_):
+        value = int(data.split(":")[-1])
+        db.set_min_price_drop(value)
+        await _safe_edit_message_text(
+            query,
+            f"✅ Minimum price drop set to <b>{value} EGP</b>",
+            reply_markup=_price_monitor_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_PRICE_CHECK:
+        user = update.effective_user
+        if not user:
+            return ConversationHandler.END
+        await query.answer("Checking prices…")
+        from price_monitoring import run_price_check
+        await run_price_check(app, user.id)
         return ConversationHandler.END
 
     return ConversationHandler.END
