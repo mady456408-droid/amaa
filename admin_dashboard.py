@@ -125,13 +125,14 @@ CB_MAX_PRODUCT_4 = "adm:inline_buttons:max_prod:4"
 CB_MAX_PRODUCT_5 = "adm:inline_buttons:max_prod:5"
 CB_PRICE_MONITOR = "adm:price_monitor"
 CB_PRICE_CHECK = "adm:price:check"
+CB_MIN_PRICE_DROP = "adm:price:min_drop:"
 CB_MIN_PRICE_DROP_SET = "adm:price:min_drop:set"
-CB_MIN_PRICE_DROP_1 = "adm:price:min_drop:1"
-CB_MIN_PRICE_DROP_5 = "adm:price:min_drop:5"
-CB_MIN_PRICE_DROP_10 = "adm:price:min_drop:10"
-CB_MIN_PRICE_DROP_25 = "adm:price:min_drop:25"
-CB_MIN_PRICE_DROP_50 = "adm:price:min_drop:50"
-CB_MIN_PRICE_DROP_100 = "adm:price:min_drop:100"
+CB_MIN_PRICE_DROP_1 = f"{CB_MIN_PRICE_DROP}1"
+CB_MIN_PRICE_DROP_5 = f"{CB_MIN_PRICE_DROP}5"
+CB_MIN_PRICE_DROP_10 = f"{CB_MIN_PRICE_DROP}10"
+CB_MIN_PRICE_DROP_25 = f"{CB_MIN_PRICE_DROP}25"
+CB_MIN_PRICE_DROP_50 = f"{CB_MIN_PRICE_DROP}50"
+CB_MIN_PRICE_DROP_100 = f"{CB_MIN_PRICE_DROP}100"
 
 UD_PENDING_RESTORE = "pending_restore_zip"
 
@@ -1383,8 +1384,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return ConversationHandler.END
 
-    if data.startswith(CB_MIN_PRICE_DROP_):
-        value = int(data.split(":")[-1])
+    if data.startswith(CB_MIN_PRICE_DROP):
+        value = int(data[len(CB_MIN_PRICE_DROP):])
         db.set_min_price_drop(value)
         await _safe_edit_message_text(
             query,
