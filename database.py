@@ -90,6 +90,19 @@ class Database:
                     ON pending_approvals (status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_draft_status_created
                     ON draft_posts (status, created_at);
+
+                CREATE TABLE IF NOT EXISTS destinations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    chat_id INTEGER NOT NULL UNIQUE,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_destinations_enabled_order
+                    ON destinations (enabled, sort_order);
                 """
             )
             conn.commit()
@@ -133,6 +146,26 @@ class Database:
                 ("published_list_price_value", "REAL"),
                 ("published_currency", "TEXT"),
                 ("last_checked_at", "TEXT"),
+                ("destination_id", "INTEGER"),
+            ):
+                if col not in published_cols:
+                    conn.execute(f"ALTER TABLE published_products ADD COLUMN {col} {col_type}")
+
+            # Add optimized index for destination-aware lookups
+            indexes = {
+                row[1]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='published_products'"
+                ).fetchall()
+            }
+            if "idx_published_destination_asin_at" not in indexes:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_published_destination_asin_at "
+                    "ON published_products (destination_id, asin, published_at DESC)"
+                )
+
+            # Add additional columns for price monitoring
+            for col, col_type in (
                 ("last_price_check", "REAL"),
                 ("previous_channel_id", "INTEGER"),
                 ("previous_message_id", "INTEGER"),
@@ -429,6 +462,23 @@ class Database:
     def is_asin_in_last_published(self, asin: str, limit: int = 10) -> bool:
         return asin.upper() in self.get_last_published_asins(limit)
 
+    def is_asin_in_last_published_for_destination(
+        self, asin: str, destination_id: int, limit: int = 10
+    ) -> bool:
+        """Check if ASIN was recently published to a specific destination."""
+        asin = asin.upper()
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=limit)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM published_products
+                WHERE asin = ? AND destination_id = ? AND published_at > ?
+                LIMIT 1
+                """,
+                (asin, destination_id, cutoff.isoformat()),
+            ).fetchone()
+        return row is not None
+
     def add_published_product(
         self,
         asin: str,
@@ -436,6 +486,7 @@ class Database:
         source_channel_id: int,
         destination_message_id: int | None,
         *,
+        destination_id: int | None = None,
         published_price: str | None = None,
         published_price_value: float | None = None,
         published_list_price: str | None = None,
@@ -448,9 +499,9 @@ class Database:
                 """
                 INSERT INTO published_products
                     (asin, title, source_channel_id, destination_message_id, published_at,
-                     published_price, published_price_value, published_list_price,
+                     destination_id, published_price, published_price_value, published_list_price,
                      published_list_price_value, published_currency)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     asin.upper(),
@@ -458,6 +509,7 @@ class Database:
                     source_channel_id,
                     destination_message_id,
                     now,
+                    destination_id,
                     published_price,
                     published_price_value,
                     published_list_price,
@@ -517,6 +569,7 @@ class Database:
         title: str,
         source_channel_id: int,
         destination_message_id: int,
+        destination_id: int | None = None,
         published_price: str | None,
         published_price_value: float | None,
         published_list_price: str | None,
@@ -530,7 +583,7 @@ class Database:
                 "SELECT * FROM published_products WHERE id = ?",
                 (published_id,),
             ).fetchone()
-            
+
             if current:
                 conn.execute(
                     """
@@ -542,6 +595,7 @@ class Database:
                         title = ?,
                         source_channel_id = ?,
                         destination_message_id = ?,
+                        destination_id = ?,
                         published_at = ?,
                         published_price = ?,
                         published_price_value = ?,
@@ -554,6 +608,7 @@ class Database:
                         title,
                         source_channel_id,
                         destination_message_id,
+                        destination_id,
                         now,
                         published_price,
                         published_price_value,
@@ -571,6 +626,7 @@ class Database:
                     SET title = ?,
                         source_channel_id = ?,
                         destination_message_id = ?,
+                        destination_id = ?,
                         published_at = ?,
                         published_price = ?,
                         published_price_value = ?,
@@ -583,6 +639,7 @@ class Database:
                         title,
                         source_channel_id,
                         destination_message_id,
+                        destination_id,
                         now,
                         published_price,
                         published_price_value,
@@ -997,3 +1054,161 @@ class Database:
             )
             conn.commit()
             return cur.rowcount > 0
+
+    # Destination CRUD methods
+
+    def add_destination(
+        self,
+        title: str,
+        chat_id: int,
+        enabled: bool = True,
+        sort_order: int = 0,
+    ) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO destinations (title, chat_id, enabled, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (title, chat_id, 1 if enabled else 0, sort_order, now, now),
+            )
+            conn.commit()
+        return cur.lastrowid
+
+    def get_destination(self, destination_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM destinations WHERE id = ?",
+                (destination_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_destinations(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        query = "SELECT * FROM destinations"
+        if enabled_only:
+            query += " WHERE enabled = 1"
+        query += " ORDER BY sort_order ASC, id ASC"
+        with self._connect() as conn:
+            rows = conn.execute(query).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_destination(
+        self,
+        destination_id: int,
+        title: str | None = None,
+        chat_id: int | None = None,
+        enabled: bool | None = None,
+        sort_order: int | None = None,
+    ) -> bool:
+        updates = []
+        params = []
+        now = datetime.now(timezone.utc).isoformat()
+
+        if title is not None:
+            updates.append("title = ?")
+            params.append(title)
+        if chat_id is not None:
+            updates.append("chat_id = ?")
+            params.append(chat_id)
+        if enabled is not None:
+            updates.append("enabled = ?")
+            params.append(1 if enabled else 0)
+        if sort_order is not None:
+            updates.append("sort_order = ?")
+            params.append(sort_order)
+
+        if not updates:
+            return False
+
+        updates.append("updated_at = ?")
+        params.append(now)
+        params.append(destination_id)
+
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"UPDATE destinations SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            conn.commit()
+        return cur.rowcount > 0
+
+    def delete_destination(self, destination_id: int) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM destinations WHERE id = ?",
+                (destination_id,),
+            )
+            conn.commit()
+        return cur.rowcount > 0
+
+    def move_destination_up(self, destination_id: int) -> bool:
+        with self._connect() as conn:
+            current = conn.execute(
+                "SELECT * FROM destinations WHERE id = ?",
+                (destination_id,),
+            ).fetchone()
+            if not current:
+                return False
+
+            current_order = current["sort_order"]
+            prev = conn.execute(
+                """
+                SELECT * FROM destinations
+                WHERE sort_order < ? AND enabled = 1
+                ORDER BY sort_order DESC
+                LIMIT 1
+                """,
+                (current_order,),
+            ).fetchone()
+
+            if not prev:
+                return False
+
+            conn.execute(
+                "UPDATE destinations SET sort_order = ? WHERE id = ?",
+                (prev["sort_order"], destination_id),
+            )
+            conn.execute(
+                "UPDATE destinations SET sort_order = ? WHERE id = ?",
+                (current_order, prev["id"]),
+            )
+            conn.commit()
+        return True
+
+    def move_destination_down(self, destination_id: int) -> bool:
+        with self._connect() as conn:
+            current = conn.execute(
+                "SELECT * FROM destinations WHERE id = ?",
+                (destination_id,),
+            ).fetchone()
+            if not current:
+                return False
+
+            current_order = current["sort_order"]
+            next_dest = conn.execute(
+                """
+                SELECT * FROM destinations
+                WHERE sort_order > ? AND enabled = 1
+                ORDER BY sort_order ASC
+                LIMIT 1
+                """,
+                (current_order,),
+            ).fetchone()
+
+            if not next_dest:
+                return False
+
+            conn.execute(
+                "UPDATE destinations SET sort_order = ? WHERE id = ?",
+                (next_dest["sort_order"], destination_id),
+            )
+            conn.execute(
+                "UPDATE destinations SET sort_order = ? WHERE id = ?",
+                (current_order, next_dest["id"]),
+            )
+            conn.commit()
+        return True
+
+    def get_enabled_destinations(self) -> list[dict[str, Any]]:
+        return self.list_destinations(enabled_only=True)

@@ -28,6 +28,7 @@ from published_price import (
     short_title,
 )
 from telegram_publisher import build_caption, publish_to_channel_with_overflow
+from multi_publisher import publish_to_destinations
 from upload_prep import to_jpeg_for_telegram
 
 logger = logging.getLogger(__name__)
@@ -349,41 +350,57 @@ async def republish_published_product(application, published_id: int) -> str:
             max_product_buttons=db.get_max_product_buttons(),
         )
 
-        sent = await publish_to_channel_with_overflow(
+        # Get enabled destinations
+        destinations = db.get_enabled_destinations()
+        if not destinations:
+            return "❌ No enabled destinations configured"
+
+        # Publish to all destinations
+        result = await publish_to_destinations(
             application.bot,
-            destination_id,
+            destinations,
             upload_image,
             caption,
             reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
             products=products,
             parse_mode="HTML",
         )
+        result.log_summary()
+
+        if result.successful == 0:
+            return "❌ Failed to publish to any destination"
 
         price_fields = extract_published_price_fields(
             product["price"],
             product.get("list_price"),
         )
         numeric_price = price_fields["published_price_value"]
-        db.update_published_product_after_republish(
-            published_id,
-            title=product["title"],
-            source_channel_id=row["source_channel_id"],
-            destination_message_id=sent.message_id,
-            published_price=price_fields["published_price"],
-            published_price_value=price_fields["published_price_value"],
-            published_list_price=price_fields["published_list_price"],
-            published_list_price_value=price_fields["published_list_price_value"],
-            published_currency=price_fields["published_currency"],
-        )
-        db.update_published_product_price_check(published_id, numeric_price)
 
-        logger.info(
-            "PRICE REPUBLISH success published_id=%s asin=%s message_id=%s",
-            published_id,
-            asin,
-            sent.message_id,
-        )
-        return f"✅ Republished ASIN <code>{asin}</code>"
+        # Update published_products for each successful destination
+        for publish_result in result.results:
+            if publish_result.success:
+                db.update_published_product_after_republish(
+                    published_id,
+                    title=product["title"],
+                    source_channel_id=row["source_channel_id"],
+                    destination_message_id=publish_result.message_id,
+                    destination_id=publish_result.destination_id,
+                    published_price=price_fields["published_price"],
+                    published_price_value=price_fields["published_price_value"],
+                    published_list_price=price_fields["published_list_price"],
+                    published_list_price_value=price_fields["published_list_price_value"],
+                    published_currency=price_fields["published_currency"],
+                )
+                db.update_published_product_price_check(published_id, numeric_price)
+
+                logger.info(
+                    "PRICE REPUBLISH success published_id=%s asin=%s message_id=%s",
+                    published_id,
+                    asin,
+                    publish_result.message_id,
+                )
+
+        return f"✅ Republished ASIN <code>{asin}</code> to {result.successful}/{result.total} destination(s)"
     finally:
         cleanup_files(temp_files)
 

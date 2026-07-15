@@ -19,6 +19,7 @@ from composite_builder import (
     chunk_urls_for_composite,
     get_composite_max_products,
 )
+from multi_publisher import publish_to_destinations
 from config import (
     ADMIN_USER_IDS,
     AMAZON_DOMAIN,
@@ -74,7 +75,6 @@ async def process_single_url(
     application,
     browser: BrowserManager,
     db: Database,
-    destination_id: int,
     url: str,
     msg: Message,
     index: int,
@@ -162,8 +162,15 @@ async def process_single_url(
             temp_files.append(upload_image)
         framed_image = product["screenshot"]
 
-        if db.is_asin_in_last_published(asin, LAST_PUBLISHED_LOOKBACK):
-            logger.info("DUPLICATE ASIN DETECTED: %s", asin)
+        # Check duplicates per destination
+        destinations = db.get_enabled_destinations()
+        duplicate_destinations = []
+        for dest in destinations:
+            if db.is_asin_in_last_published_for_destination(asin, dest["id"], LAST_PUBLISHED_LOOKBACK):
+                duplicate_destinations.append(dest["title"])
+
+        if duplicate_destinations:
+            logger.info("DUPLICATE ASIN DETECTED: %s in destinations: %s", asin, ", ".join(duplicate_destinations))
             held_for_approval = framed_image
             if held_for_approval in temp_files:
                 temp_files.remove(held_for_approval)
@@ -215,26 +222,42 @@ async def process_single_url(
             max_product_buttons=max_product_buttons,
         )
 
-        sent = await publish_to_channel_with_overflow(
+        # Get enabled destinations
+        destinations = db.get_enabled_destinations()
+        if not destinations:
+            logger.error("No enabled destinations configured")
+            cleanup_files(temp_files)
+            return False
+
+        # Publish to all destinations
+        result = await publish_to_destinations(
             application.bot,
-            destination_id,
+            destinations,
             upload_image,
             caption,
             reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
             products=products,
             parse_mode="HTML",
         )
+        result.log_summary()
+
         price_fields = extract_published_price_fields(
             product["price"],
             product.get("list_price"),
         )
-        db.add_published_product(
-            asin,
-            product["title"],
-            source_channel_id,
-            sent.message_id,
-            **price_fields,
-        )
+
+        # Add to published_products for each successful destination
+        for publish_result in result.results:
+            if publish_result.success:
+                db.add_published_product(
+                    asin,
+                    product["title"],
+                    source_channel_id,
+                    publish_result.message_id,
+                    destination_id=publish_result.destination_id,
+                    **price_fields,
+                )
+
         logger.info("PUBLISHED URL %s/%s asin=%s", index, total, asin)
         published_paths = [product["screenshot"], framed_image]
         if upload_image != framed_image:
@@ -256,7 +279,6 @@ async def process_composite_urls(
     application,
     browser: BrowserManager,
     db: Database,
-    destination_id: int,
     urls: list[str],
     msg: Message,
     chunk_index: int,
@@ -313,33 +335,45 @@ async def process_composite_urls(
             max_product_buttons=max_product_buttons,
         )
 
-        sent = await publish_to_channel_with_overflow(
+        # Get enabled destinations
+        destinations = db.get_enabled_destinations()
+        if not destinations:
+            logger.error("No enabled destinations configured")
+            cleanup_files(temp_files)
+            return False
+
+        # Publish to all destinations
+        result = await publish_to_destinations(
             application.bot,
-            destination_id,
+            destinations,
             upload_image,
             caption,
             reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
             products=products,
             parse_mode="HTML",
         )
+        result.log_summary()
 
-        # Add all products to published_products
+        # Add all products to published_products for each successful destination
         for entry in entries:
             price_fields = extract_published_price_fields(
                 entry["product"]["price"],
                 entry["product"].get("list_price"),
             )
-            db.add_published_product(
-                entry["asin"],
-                entry["title"],
-                source_channel_id,
-                sent.message_id,
-                **price_fields,
-            )
+            for publish_result in result.results:
+                if publish_result.success:
+                    db.add_published_product(
+                        entry["asin"],
+                        entry["title"],
+                        source_channel_id,
+                        publish_result.message_id,
+                        destination_id=publish_result.destination_id,
+                        **price_fields,
+                    )
 
         logger.info("COMPOSITE PUBLISHED chunk=%s/%s asins=%s", chunk_index, total_chunks, ",".join(e["asin"] for e in entries))
         cleanup_files(temp_files)
-        return True
+        return result.successful > 0
     except Exception:
         logger.exception("COMPOSITE CHUNK FAILED chunk=%s/%s", chunk_index, total_chunks)
         cleanup_files(temp_files)
@@ -351,10 +385,11 @@ async def process_message(application, msg: Message) -> None:
     dedup: TTLCache = application.bot_data["dedup"]
     browser: BrowserManager = application.bot_data["browser"]
     db: Database = application.bot_data["db"]
-    destination_id = application.bot_data.get("destination_channel_id")
 
-    if not destination_id:
-        logger.error("No destination channel configured — skipping message_id=%s", message_id)
+    # Check if destinations are configured
+    destinations = db.get_enabled_destinations()
+    if not destinations:
+        logger.error("No enabled destinations configured — skipping message_id=%s", message_id)
         return
 
     msg_key = f"msg:{msg.chat_id}:{message_id}"
@@ -386,7 +421,6 @@ async def process_message(application, msg: Message) -> None:
             application,
             browser,
             db,
-            destination_id,
             urls,
             msg,
             chunk_index=1,
@@ -405,7 +439,6 @@ async def process_message(application, msg: Message) -> None:
                         application,
                         browser,
                         db,
-                        destination_id,
                         chunk,
                         msg,
                         chunk_index,
@@ -418,7 +451,6 @@ async def process_message(application, msg: Message) -> None:
                             application,
                             browser,
                             db,
-                            destination_id,
                             url,
                             msg,
                             published + 1,
@@ -435,7 +467,6 @@ async def process_message(application, msg: Message) -> None:
                     application,
                     browser,
                     db,
-                    destination_id,
                     url,
                     msg,
                     index,

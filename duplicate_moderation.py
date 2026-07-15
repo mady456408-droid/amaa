@@ -7,6 +7,7 @@ from telegram.ext import CallbackQueryHandler, ContextTypes
 from config import ADMIN_USER_IDS, APPROVAL_TIMEOUT_MINUTES, LAST_PUBLISHED_LOOKBACK, AMAZON_DOMAIN
 from database import Database
 from telegram_publisher import publish_to_channel_with_overflow
+from multi_publisher import publish_to_destinations
 from file_cleanup import cleanup_files
 from upload_prep import prepare_channel_upload
 from affiliate_tag import apply_affiliate_tag
@@ -142,26 +143,48 @@ async def publish_and_record(
         }
     ]
 
-    sent = await publish_to_channel_with_overflow(
+    # Get enabled destinations
+    destinations = db.get_enabled_destinations()
+    if not destinations:
+        raise ValueError("No enabled destinations configured")
+
+    # Publish to all destinations
+    result = await publish_to_destinations(
         application.bot,
-        destination_id,
+        destinations,
         publish_path,
         caption,
         products=products,
         parse_mode="HTML",
     )
+    result.log_summary()
+
+    if result.successful == 0:
+        raise ValueError("Failed to publish to any destination")
+
     price_fields = extract_published_price_fields(
         pending.get("price") or "",
         pending.get("list_price"),
     )
-    db.add_published_product(
-        pending["asin"],
-        pending["title"],
-        pending["source_channel_id"],
-        sent.message_id,
-        **price_fields,
-    )
-    return sent
+
+    # Add to published_products for each successful destination
+    for publish_result in result.results:
+        if publish_result.success:
+            db.add_published_product(
+                pending["asin"],
+                pending["title"],
+                pending["source_channel_id"],
+                publish_result.message_id,
+                destination_id=publish_result.destination_id,
+                **price_fields,
+            )
+
+    # Return the first successful message for compatibility
+    for publish_result in result.results:
+        if publish_result.success:
+            return publish_result.message_id
+
+    raise ValueError("No successful publishes")
 
 
 async def handle_approve_duplicate(

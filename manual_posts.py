@@ -44,6 +44,7 @@ from telegram_publisher import (
     SAFE_CAPTION_LENGTH,
     build_compact_product_summary,
 )
+from multi_publisher import publish_to_destinations
 from upload_prep import prepare_channel_upload
 from coupon_price import coupon_apply_kwargs_from_product, normalize_caption_price_line
 from inline_buttons import build_inline_keyboard
@@ -665,27 +666,43 @@ async def handle_publish_draft(
         # Determine products for overflow summary
         products = _extract_products_from_draft(draft)
 
-        sent = await publish_to_channel_with_overflow(
+        # Get enabled destinations
+        destinations = db.get_enabled_destinations()
+        if not destinations:
+            await query.edit_message_caption("❌ No enabled destinations configured.")
+            return
+
+        # Publish to all destinations
+        result = await publish_to_destinations(
             context.application.bot,
-            destination_id,
+            destinations,
             publish_path,
             caption,
             reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
             products=products,
             parse_mode="HTML",
         )
+        result.log_summary()
+
+        if result.successful == 0:
+            await query.edit_message_caption("❌ Failed to publish to any destination.")
+            return
+
         price_fields = extract_published_price_fields(
             draft.get("price") or "",
             draft.get("list_price"),
         )
         for asin in draft_asins:
-            db.add_published_product(
-                asin,
-                draft["title"],
-                draft["created_by"],
-                sent.message_id,
-                **price_fields,
-            )
+            for publish_result in result.results:
+                if publish_result.success:
+                    db.add_published_product(
+                        asin,
+                        draft["title"],
+                        draft["created_by"],
+                        publish_result.message_id,
+                        destination_id=publish_result.destination_id,
+                        **price_fields,
+                    )
         if not db.set_draft_status(draft_id, "published"):
             await query.edit_message_caption("Already handled.")
             logger.info(
@@ -698,7 +715,7 @@ async def handle_publish_draft(
             return
         logger.info("DRAFT PUBLISHED draft_id=%s asin=%s", draft_id, draft["asin"])
         await query.edit_message_caption(
-            f"✅ Published ASIN <code>{draft['asin']}</code>",
+            f"✅ Published to {result.successful}/{result.total} destination(s)",
             parse_mode="HTML",
         )
         logger.info(

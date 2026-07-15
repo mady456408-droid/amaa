@@ -41,6 +41,8 @@ from conversation_states import (
     AWAIT_CUSTOM_IMAGE_POST,
     AWAIT_FIXED_BUTTON_TITLE,
     AWAIT_FIXED_BUTTON_URL,
+    AWAIT_DESTINATION_TITLE,
+    AWAIT_DESTINATION_CHAT_ID,
 )
 from telethon_auth import (
     AUTH_STATE_CODE,
@@ -133,6 +135,17 @@ CB_MIN_PRICE_DROP_10 = f"{CB_MIN_PRICE_DROP}10"
 CB_MIN_PRICE_DROP_25 = f"{CB_MIN_PRICE_DROP}25"
 CB_MIN_PRICE_DROP_50 = f"{CB_MIN_PRICE_DROP}50"
 CB_MIN_PRICE_DROP_100 = f"{CB_MIN_PRICE_DROP}100"
+CB_DESTINATIONS = "adm:destinations"
+CB_DESTINATIONS_LIST = "adm:destinations:list"
+CB_DESTINATIONS_ADD = "adm:destinations:add"
+CB_DESTINATIONS_EDIT = "adm:destinations:edit:"
+CB_DESTINATIONS_DELETE = "adm:destinations:delete:"
+CB_DESTINATIONS_ENABLE = "adm:destinations:enable:"
+CB_DESTINATIONS_DISABLE = "adm:destinations:disable:"
+CB_DESTINATIONS_UP = "adm:destinations:up:"
+CB_DESTINATIONS_DOWN = "adm:destinations:down:"
+CB_DESTINATIONS_AWAIT_TITLE = "adm:destinations:await_title"
+CB_DESTINATIONS_AWAIT_CHAT_ID = "adm:destinations:await_chat_id"
 
 UD_PENDING_RESTORE = "pending_restore_zip"
 
@@ -182,7 +195,7 @@ def _main_keyboard(paused: bool, telethon_connected: bool = True) -> InlineKeybo
             ],
             [
                 InlineKeyboardButton("📋 List Sources", callback_data=CB_LIST),
-                InlineKeyboardButton("🎯 Set Destination", callback_data=CB_DEST),
+                InlineKeyboardButton("📢 Destinations", callback_data=CB_DESTINATIONS),
             ],
             [
                 pause_btn,
@@ -1384,6 +1397,146 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return ConversationHandler.END
 
+    if data == CB_DESTINATIONS:
+        await _safe_edit_message_text(
+            query,
+            await _destinations_menu_text(db),
+            reply_markup=_destinations_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_DESTINATIONS_LIST:
+        await _safe_edit_message_text(
+            query,
+            await _destinations_list_text(db),
+            reply_markup=_destinations_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_DESTINATIONS_ADD:
+        await _safe_edit_message_text(
+            query,
+            "➕ <b>Add Destination</b>\n\n"
+            "Enter the channel name (e.g., LoqtaBGD):",
+            parse_mode="HTML",
+        )
+        return AWAIT_DESTINATION_TITLE
+
+    if data.startswith(CB_DESTINATIONS_EDIT):
+        destination_id = int(data.replace(CB_DESTINATIONS_EDIT, ""))
+        dest = db.get_destination(destination_id)
+        if dest:
+            context.user_data["editing_destination_id"] = destination_id
+            await _safe_edit_message_text(
+                query,
+                f"✏️ <b>Edit Destination</b>\n\n"
+                f"Current title: <b>{dest['title']}</b>\n"
+                f"Current chat_id: <b>{dest['chat_id']}</b>\n\n"
+                "Enter new title (or send /cancel to skip):",
+                parse_mode="HTML",
+            )
+            return AWAIT_DESTINATION_TITLE
+        else:
+            await _safe_edit_message_text(
+                query,
+                "❌ Destination not found.",
+                reply_markup=_destinations_keyboard(db),
+                parse_mode="HTML",
+            )
+            return ConversationHandler.END
+
+    if data.startswith(CB_DESTINATIONS_DELETE):
+        destination_id = int(data.replace(CB_DESTINATIONS_DELETE, ""))
+        if db.delete_destination(destination_id):
+            await _safe_edit_message_text(
+                query,
+                "✅ Destination deleted.",
+                reply_markup=_destinations_keyboard(db),
+                parse_mode="HTML",
+            )
+        else:
+            await _safe_edit_message_text(
+                query,
+                "❌ Failed to delete destination.",
+                reply_markup=_destinations_keyboard(db),
+                parse_mode="HTML",
+            )
+        return ConversationHandler.END
+
+    if data.startswith(CB_DESTINATIONS_ENABLE):
+        destination_id = int(data.replace(CB_DESTINATIONS_ENABLE, ""))
+        if db.update_destination(destination_id, enabled=True):
+            await _safe_edit_message_text(
+                query,
+                "✅ Destination enabled.",
+                reply_markup=_destinations_keyboard(db),
+                parse_mode="HTML",
+            )
+        else:
+            await _safe_edit_message_text(
+                query,
+                "❌ Failed to enable destination.",
+                reply_markup=_destinations_keyboard(db),
+                parse_mode="HTML",
+            )
+        return ConversationHandler.END
+
+    if data.startswith(CB_DESTINATIONS_DISABLE):
+        destination_id = int(data.replace(CB_DESTINATIONS_DISABLE, ""))
+        if db.update_destination(destination_id, enabled=False):
+            await _safe_edit_message_text(
+                query,
+                "✅ Destination disabled.",
+                reply_markup=_destinations_keyboard(db),
+                parse_mode="HTML",
+            )
+        else:
+            await _safe_edit_message_text(
+                query,
+                "❌ Failed to disable destination.",
+                reply_markup=_destinations_keyboard(db),
+                parse_mode="HTML",
+            )
+        return ConversationHandler.END
+
+    if data.startswith(CB_DESTINATIONS_UP):
+        destination_id = int(data.replace(CB_DESTINATIONS_UP, ""))
+        if db.move_destination_up(destination_id):
+            await _safe_edit_message_text(
+                query,
+                "✅ Destination moved up.",
+                reply_markup=_destinations_keyboard(db),
+                parse_mode="HTML",
+            )
+        else:
+            await _safe_edit_message_text(
+                query,
+                "❌ Cannot move destination up (already at top).",
+                reply_markup=_destinations_keyboard(db),
+                parse_mode="HTML",
+            )
+        return ConversationHandler.END
+
+    if data.startswith(CB_DESTINATIONS_DOWN):
+        destination_id = int(data.replace(CB_DESTINATIONS_DOWN, ""))
+        if db.move_destination_down(destination_id):
+            await _safe_edit_message_text(
+                query,
+                "✅ Destination moved down.",
+                reply_markup=_destinations_keyboard(db),
+                parse_mode="HTML",
+            )
+        else:
+            await _safe_edit_message_text(
+                query,
+                "❌ Cannot move destination down (already at bottom).",
+                reply_markup=_destinations_keyboard(db),
+                parse_mode="HTML",
+            )
+        return ConversationHandler.END
+
     if data.startswith(CB_MIN_PRICE_DROP):
         value = int(data[len(CB_MIN_PRICE_DROP):])
         db.set_min_price_drop(value)
@@ -1645,20 +1798,180 @@ async def receive_fixed_button_url(
         await msg.reply_text(
             "✅ Button updated.",
             reply_markup=_inline_buttons_keyboard(db),
-            parse_mode="HTML",
         )
     else:
-        # Get max sort_order for new button
-        buttons = db.list_fixed_buttons()
-        max_order = max((b["sort_order"] for b in buttons), default=-1)
-        db.create_fixed_button(title, url, sort_order=max_order + 1)
+        db.add_fixed_button(title, url)
         await msg.reply_text(
             "✅ Button added.",
             reply_markup=_inline_buttons_keyboard(db),
-            parse_mode="HTML",
         )
+    return ConversationHandler.END
+
+
+# Destination conversation handlers
+
+async def receive_destination_title(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
+
+    msg = update.message
+    title = (msg.text or "").strip()
+    if not title:
+        await msg.reply_text("Title cannot be empty. Try again or /cancel.")
+        return AWAIT_DESTINATION_TITLE
+
+    # Validate title length
+    if len(title) > 64:
+        await msg.reply_text(
+            f"❌ Title too long.\n\n"
+            f"Title must be 64 characters or less.\n"
+            f"Current length: {len(title)}\n\n"
+            f"Try again or /cancel.",
+        )
+        return AWAIT_DESTINATION_TITLE
+
+    context.user_data["destination_title"] = title
+    await msg.reply_text(
+        "Enter the channel chat ID (e.g., -1001234567890):\n\n"
+        "Tip: Forward a message from the channel to @userinfobot to get the chat ID.",
+    )
+    return AWAIT_DESTINATION_CHAT_ID
+
+
+async def receive_destination_chat_id(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
+
+    msg = update.message
+    chat_id_str = (msg.text or "").strip()
+    if not chat_id_str:
+        await msg.reply_text("Chat ID cannot be empty. Try again or /cancel.")
+        return AWAIT_DESTINATION_CHAT_ID
+
+    # Validate chat ID is an integer
+    try:
+        chat_id = int(chat_id_str)
+    except ValueError:
+        await msg.reply_text(
+            "❌ Invalid chat ID.\n\n"
+            "Chat ID must be a number (e.g., -1001234567890).\n\n"
+            "Try again or /cancel.",
+        )
+        return AWAIT_DESTINATION_CHAT_ID
+
+    title = context.user_data.pop("destination_title", "")
+    if not title:
+        await msg.reply_text("Error: Title lost. Please start over.")
+        return ConversationHandler.END
+
+    db = _db(context)
+
+    # Check if editing or adding
+    editing_id = context.user_data.pop("editing_destination_id", None)
+    if editing_id:
+        # Update existing destination
+        dest = db.get_destination(editing_id)
+        if dest:
+            db.update_destination(editing_id, title=title, chat_id=chat_id)
+            await msg.reply_text(
+                "✅ Destination updated.",
+                reply_markup=_destinations_keyboard(db),
+            )
+        else:
+            await msg.reply_text("❌ Destination not found.")
+            return ConversationHandler.END
+    else:
+        # Add new destination
+        try:
+            db.add_destination(title, chat_id)
+            await msg.reply_text(
+                "✅ Destination added.",
+                reply_markup=_destinations_keyboard(db),
+            )
+        except Exception as e:
+            if "UNIQUE constraint" in str(e):
+                await msg.reply_text(
+                    "❌ Chat ID already exists.\n\n"
+                    "Each destination must have a unique chat ID.",
+                )
+                return ConversationHandler.END
+            raise
 
     return ConversationHandler.END
+
+
+# Destination helper functions
+
+async def _destinations_menu_text(db: Database) -> str:
+    """Build text for destinations menu."""
+    destinations = db.list_destinations()
+    enabled_count = sum(1 for d in destinations if d["enabled"])
+    return (
+        f"📢 <b>Destinations</b>\n\n"
+        f"Total: <b>{len(destinations)}</b>\n"
+        f"Enabled: <b>{enabled_count}</b>\n\n"
+        f"Manage where your posts are published."
+    )
+
+
+async def _destinations_list_text(db: Database) -> str:
+    """Build text for destinations list."""
+    destinations = db.list_destinations()
+    if not destinations:
+        return "📢 <b>Destinations</b>\n\nNo destinations configured."
+
+    lines = ["📢 <b>Destinations</b>\n\n"]
+    for dest in destinations:
+        status = "✅" if dest["enabled"] else "❌"
+        lines.append(
+            f"{status} <b>{dest['title']}</b>\n"
+            f"   Chat ID: <code>{dest['chat_id']}</code>\n"
+            f"   Order: {dest['sort_order']}\n"
+        )
+    return "\n".join(lines)
+
+
+def _destinations_keyboard(db: Database) -> InlineKeyboardMarkup:
+    """Build keyboard for destinations menu."""
+    destinations = db.list_destinations()
+    rows = []
+
+    if destinations:
+        for dest in destinations:
+            status = "✅" if dest["enabled"] else "❌"
+            row = [
+                InlineKeyboardButton(
+                    f"{status} {dest['title']}", callback_data=f"view_dest_{dest['id']}"
+                ),
+                InlineKeyboardButton("⬆", callback_data=f"{CB_DESTINATIONS_UP}{dest['id']}"),
+                InlineKeyboardButton("⬇", callback_data=f"{CB_DESTINATIONS_DOWN}{dest['id']}"),
+            ]
+            rows.append(row)
+            action_row = [
+                InlineKeyboardButton("✏️", callback_data=f"{CB_DESTINATIONS_EDIT}{dest['id']}"),
+                InlineKeyboardButton(
+                    "🗑", callback_data=f"{CB_DESTINATIONS_DELETE}{dest['id']}"
+                ),
+                InlineKeyboardButton(
+                    "🔓" if not dest["enabled"] else "🔒",
+                    callback_data=(
+                        f"{CB_DESTINATIONS_ENABLE}{dest['id']}"
+                        if not dest["enabled"]
+                        else f"{CB_DESTINATIONS_DISABLE}{dest['id']}"
+                    ),
+                ),
+            ]
+            rows.append(action_row)
+
+    rows.append([InlineKeyboardButton("➕ Add Destination", callback_data=CB_DESTINATIONS_ADD)])
+    rows.append([InlineKeyboardButton("📋 List Destinations", callback_data=CB_DESTINATIONS_LIST)])
+    rows.append([InlineKeyboardButton("« Back", callback_data=CB_MAIN)])
+
+    return InlineKeyboardMarkup(rows)
 
 
 async def receive_telethon_code(
@@ -1851,6 +2164,18 @@ def build_admin_handlers() -> list:
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND & admin_filter,
                     receive_fixed_button_url,
+                ),
+            ],
+            AWAIT_DESTINATION_TITLE: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & admin_filter,
+                    receive_destination_title,
+                ),
+            ],
+            AWAIT_DESTINATION_CHAT_ID: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & admin_filter,
+                    receive_destination_chat_id,
                 ),
             ],
             **manual_states,
