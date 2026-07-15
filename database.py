@@ -152,17 +152,10 @@ class Database:
                     conn.execute(f"ALTER TABLE published_products ADD COLUMN {col} {col_type}")
 
             # Add optimized index for destination-aware lookups
-            indexes = {
-                row[1]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='published_products'"
-                ).fetchall()
-            }
-            if "idx_published_destination_asin_at" not in indexes:
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_published_destination_asin_at "
-                    "ON published_products (destination_id, asin, published_at DESC)"
-                )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_published_destination_asin_at "
+                "ON published_products (destination_id, asin, published_at DESC)"
+            )
 
             # Add additional columns for price monitoring
             for col, col_type in (
