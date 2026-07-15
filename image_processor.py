@@ -12,6 +12,9 @@ from PIL import features
 
 _HAS_RAQM = features.check("raqm")
 
+# Global typography scale - adjust to scale all typography uniformly
+_FONT_SCALE = 1.15
+
 _FRAME_PADDING = 40
 _LEFT_PANEL_RATIO_MIN = 0.30
 _LEFT_PANEL_RATIO_MAX = 0.32
@@ -24,32 +27,32 @@ _INFO_PAD = 28
 _INFO_TOP_OFFSET = 6
 _TITLE_MAX_LINES = 2
 _TITLE_AFTER_GAP = 20
-_TITLE_FONT_MAX = 64
-_TITLE_FONT_MIN = 38
-_TITLE_LINE_GAP = 16
-_OLD_PRICE_FONT = 34
-_OLD_PRICE_STRIKE_WIDTH = 2
-_PRICE_LABEL_FONT = 28
-_PRICE_CURRENCY_FONT = 38
-_PRICE_NUM_MAX = 99
-_PRICE_NUM_MIN = 64
+_TITLE_FONT_MAX = int(72 * _FONT_SCALE)
+_TITLE_FONT_MIN = int(44 * _FONT_SCALE)
+_TITLE_LINE_GAP = int(16 * _FONT_SCALE)
+_OLD_PRICE_FONT = int(70 * _FONT_SCALE)
+_OLD_PRICE_STRIKE_WIDTH = int(6 * _FONT_SCALE)
+_PRICE_LABEL_FONT = int(32 * _FONT_SCALE)
+_PRICE_CURRENCY_FONT = int(42 * _FONT_SCALE)
+_PRICE_NUM_MAX = int(110 * _FONT_SCALE)
+_PRICE_NUM_MIN = int(72 * _FONT_SCALE)
 _PRICE_CARD_PAD_X = 50
 _PRICE_CARD_PAD_Y = 35
 _PRICE_CARD_RADIUS = 26
 _PRICE_CARD_INNER_RESERVE = 100
 _PRICE_CARD_WIDTH_BOOST = 1.12
 _PRICE_NUM_CURRENCY_GAP = 11
-_DISCOUNT_BADGE_FONT = 40
+_DISCOUNT_BADGE_FONT = int(46 * _FONT_SCALE)
 _DISCOUNT_BADGE_PAD_X = 28
 _DISCOUNT_BADGE_PAD_Y = 16
 _DISCOUNT_BADGE_RADIUS = 19
 _AMAZON_YELLOW = (255, 216, 20, 255)
-_GRAY_TEXT = (120, 120, 120, 255)
+_GRAY_TEXT = (70, 70, 70, 255)
 _LABEL_GRAY = (85, 85, 85, 255)
-_BLACK_TEXT = (20, 20, 20, 255)
+_BLACK_TEXT = (10, 10, 10, 255)
 _DISCOUNT_RED = (190, 35, 35, 255)
 _PRIME_BLUE_LIGHT = (0, 168, 225, 105)
-_PRIME_BADGE_FONT = 23
+_PRIME_BADGE_FONT = int(26 * _FONT_SCALE)
 _PRIME_BADGE_PAD_X = 17
 _PRIME_BADGE_PAD_Y = 7
 _PRIME_BADGE_RADIUS = 13
@@ -66,8 +69,8 @@ _COMPOSITE_GRID_GAP = 20
 _COMPOSITE_CARD_PAD = 12
 _COMPOSITE_IMG_TEXT_GAP = 10
 _COMPOSITE_TITLE_PRICE_GAP = 8
-_COMPOSITE_TITLE_FONT_MAX = 30
-_COMPOSITE_TITLE_FONT_MIN = 17
+_COMPOSITE_TITLE_FONT_MAX = int(30 * _FONT_SCALE)
+_COMPOSITE_TITLE_FONT_MIN = int(17 * _FONT_SCALE)
 _COMPOSITE_PORTRAIT_HEIGHT_RATIO = 1.18
 _COMPOSITE_MIN_IMAGE_RATIO = 0.42
 
@@ -432,9 +435,6 @@ _ARABIC_TITLE_FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/noto/NotoKufiArabic-Bold.ttf",
     "/usr/share/fonts/opentype/noto/NotoKufiArabic-Bold.ttf",
     "C:/Windows/Fonts/NotoKufiArabic-Bold.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansArabic-SemiBold.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansArabic-SemiBold.ttf",
-    "C:/Windows/Fonts/NotoSansArabic-SemiBold.ttf",
 ]
 
 _LATIN_TITLE_FONT_CANDIDATES = [
@@ -456,6 +456,7 @@ _ARABIC_TITLE_FONT_FALLBACKS = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
     "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
+    "C:/Windows/Fonts/NotoSansArabic-Bold.ttf",
 ]
 
 _MIXED_SCRIPT_UI_FONT_CANDIDATES_REGULAR = [
@@ -621,24 +622,108 @@ def _wrap_title_lines(
     max_width: int,
     max_lines: int,
 ) -> list[str]:
+    """Smart text wrapping with better break positions."""
+    import re
+    
     words = text.split()
     if not words:
         return []
 
+    # Terms that should not be split across lines
+    unsplittable = {
+        "4K", "LED", "RAM", "SSD", "GB", "TB", "Hz", "inch", "inches",
+        "WiFi", "Bluetooth", "USB", "HDMI", "DPI", "FPS", "MP",
+        "جيجا", "بوصة", "ميجا", "تيرا",
+        "Pro", "Max", "Plus", "Ultra", "Lite", "Mini",
+    }
+
+    # Patterns for model identifiers (should not be split even if they contain separators)
+    model_patterns = [
+        r'[A-Z]{2,}\d{3,}[A-Z]*',  # SM-G991B, UA65M80H
+        r'[A-Za-z]+\d+',  # iPhone16, M80H
+        r'\d+[A-Za-z]+',  # 4060Ti
+        r'USB-C',  # USB-C
+        r'Type-C',  # Type-C
+        r'Wi-Fi',  # Wi-Fi
+        r'DDR\d+-\d+',  # DDR5-5600
+        r'RTX-\d+',  # RTX-4060
+    ]
+
+    def is_model_identifier(word: str) -> bool:
+        """Check if word is a model identifier that should not be split."""
+        for pattern in model_patterns:
+            if re.search(pattern, word, re.IGNORECASE):
+                return True
+        return False
+
     lines: list[str] = []
     current = ""
+    
     for word in words:
-        trial = f"{current} {word}".strip()
-        if _text_bbox(draw, trial, font)[0] <= max_width:
+        trial = f"{current} {word}".strip() if current else word
+        trial_width = _text_bbox(draw, trial, font)[0]
+        
+        if trial_width <= max_width:
             current = trial
             continue
+        
+        # Word doesn't fit, start new line
         if current:
             lines.append(current)
             if len(lines) >= max_lines:
                 break
-        current = word
-        if _text_bbox(draw, current, font)[0] > max_width:
-            current = _truncate_line(draw, word, font, max_width)
+            current = word
+        else:
+            # Single word too long
+            # Check if it contains unsplittable term or is a model identifier
+            word_upper = word.upper()
+            is_unsplittable = any(term.upper() in word_upper for term in unsplittable)
+            is_model = is_model_identifier(word)
+            
+            if is_unsplittable or is_model:
+                # Truncate unsplittable/model word
+                current = _truncate_line(draw, word, font, max_width)
+                lines.append(current)
+                if len(lines) >= max_lines:
+                    break
+                current = ""
+            else:
+                # Try to split at common separators (but not in model identifiers)
+                separators = ['-', '/', '(', ')']
+                split_done = False
+                for sep in separators:
+                    if sep in word and not is_model_identifier(word):
+                        parts = word.split(sep)
+                        temp_lines = []
+                        temp_current = ""
+                        for i, part in enumerate(parts):
+                            test = temp_current + part if temp_current else part
+                            if i < len(parts) - 1:
+                                test += sep
+                            if _text_bbox(draw, test, font)[0] <= max_width:
+                                temp_current = test
+                            else:
+                                if temp_current:
+                                    temp_lines.append(temp_current)
+                                temp_current = part + (sep if i < len(parts) - 1 else "")
+                        if temp_current:
+                            temp_lines.append(temp_current)
+                        
+                        if len(temp_lines) > 1:
+                            lines.extend(temp_lines[:max_lines - len(lines)])
+                            if len(lines) >= max_lines:
+                                break
+                            current = ""
+                            split_done = True
+                            break
+                
+                if not split_done:
+                    # Can't split, truncate
+                    current = _truncate_line(draw, word, font, max_width)
+                    lines.append(current)
+                    if len(lines) >= max_lines:
+                        break
+                    current = ""
 
     if len(lines) < max_lines and current:
         lines.append(current)
@@ -809,14 +894,28 @@ def _resolve_title_layout(
     max_width: int,
     scale: float,
 ) -> tuple[ImageFont.ImageFont, list[str]]:
+    """Resolve title layout with width-based dynamic sizing."""
     max_size = _scaled(_TITLE_FONT_MAX, scale)
     min_size = max(20, _scaled(_TITLE_FONT_MIN, scale))
     step = max(2, _scaled(2, scale))
+    
+    # Try font sizes from largest to smallest
     for size in range(max_size, min_size - 1, -step):
         font = _load_title_font(size, title=title)
         lines = _wrap_title_lines(draw, title, font, max_width, _TITLE_MAX_LINES)
         if lines:
+            # Check if the layout looks balanced
+            # Prefer layouts that use both lines efficiently for longer titles
+            if len(lines) == 2:
+                # Check if second line is too short (orphan)
+                line1_width = _text_bbox(draw, lines[0], font)[0]
+                line2_width = _text_bbox(draw, lines[1], font)[0]
+                # If second line is less than 30% of first line, try smaller font
+                if line2_width < line1_width * 0.3 and size > min_size + step:
+                    continue
             return font, lines
+    
+    # Fallback to minimum size
     font = _load_title_font(min_size, title=title)
     return font, _wrap_title_lines(draw, title, font, max_width, _TITLE_MAX_LINES)
 
@@ -889,8 +988,10 @@ def _layout_price_card_inner(
 ) -> _PriceCardInnerLayout:
     number, currency = _parse_price_display(price)
     num_font, _ = _fit_price_number_font(draw, number, panel_width, scale)
-    label_font = _load_ui_font(_scaled(_PRICE_LABEL_FONT, scale), _PRICE_LABEL, bold=False)
-    curr_font = _load_ui_font(_scaled(_PRICE_CURRENCY_FONT, scale), currency, bold=False)
+    # Use medium weight for label (semi-bold)
+    label_font = _load_ui_font(_scaled(_PRICE_LABEL_FONT, scale), _PRICE_LABEL, bold=True)
+    # Use bold weight for currency to increase contrast
+    curr_font = _load_ui_font(_scaled(_PRICE_CURRENCY_FONT, scale), currency, bold=True)
 
     pad_x = _scaled(_PRICE_CARD_PAD_X, scale)
     pad_y = _scaled(_PRICE_CARD_PAD_Y, scale)
@@ -970,13 +1071,19 @@ def draw_title(
     scale: float,
     trailing_gap: bool = True,
 ) -> int:
+    """Draw title with dynamic line spacing based on font size."""
     title_font, lines = _resolve_title_layout(draw, title, panel_width, scale)
-    line_gap = _scaled(_TITLE_LINE_GAP, scale)
+    
+    # Calculate dynamic line spacing (22% of font size)
+    font_size = title_font.size if hasattr(title_font, 'size') else int(_scaled(_TITLE_FONT_MAX, scale))
+    line_gap = int(font_size * 0.22)
+    
+    current_y = y
     for line in lines:
         line_h = _draw_aligned_text(
             draw,
             panel_x,
-            y,
+            current_y,
             line,
             title_font,
             _BLACK_TEXT,
@@ -984,14 +1091,13 @@ def draw_title(
             panel_width,
             _contains_arabic(line),
         )
-        y += line_h + line_gap
+        current_y += line_h + line_gap
+    
     if lines:
-        y -= line_gap
+        current_y -= line_gap
     if trailing_gap:
-        return y + _scaled(_TITLE_AFTER_GAP, scale)
-    return y
-
-
+        return current_y + _scaled(_TITLE_AFTER_GAP, scale)
+    return current_y
 def draw_old_price(
     draw: ImageDraw.ImageDraw,
     *,
@@ -1003,19 +1109,60 @@ def draw_old_price(
     scale: float,
 ) -> int:
     number, currency = _parse_price_display(list_price)
-    text = f"{_OLD_PRICE_LABEL} {number} {currency}"
-    font = _load_ui_font(_scaled(_OLD_PRICE_FONT, scale), text, bold=False)
-    tw, th = _text_bbox(draw, text, font)
-    draw_x = panel_x + panel_width - tw if rtl else panel_x
-    _draw_text(draw, (draw_x, y), text, font, _GRAY_TEXT)
-    strike_y = y + th // 2
+
+    label = _OLD_PRICE_LABEL
+    number_text = number
+    currency_text = currency
+
+    font = _load_ui_font(
+        _scaled(_OLD_PRICE_FONT, scale),
+        f"{label} {number_text} {currency_text}",
+        bold=False,
+    )
+
+    label_w, label_h = _text_bbox(draw, label, font)
+    space_w, _ = _text_bbox(draw, " ", font)
+    number_w, number_h = _text_bbox(draw, number_text, font)
+    currency_w, currency_h = _text_bbox(draw, currency_text, font)
+
+    total_w = (
+        label_w
+        + space_w
+        + number_w
+        + space_w
+        + currency_w
+    )
+
+    draw_x = panel_x + panel_width - total_w if rtl else panel_x
+
+    if rtl:
+        # Arabic RTL layout
+        currency_x = draw_x
+        number_x = currency_x + currency_w + space_w
+        label_x = number_x + number_w + space_w
+    else:
+        label_x = draw_x
+        number_x = label_x + label_w + space_w
+        currency_x = number_x + number_w + space_w
+
+    _draw_text(draw, (label_x, y), label, font, _GRAY_TEXT)
+    _draw_text(draw, (number_x, y), number_text, font, _GRAY_TEXT)
+    _draw_text(draw, (currency_x, y), currency_text, font, _GRAY_TEXT)
+
+    strike_y = y + number_h // 2 + _scaled(20, scale)
+
     draw.line(
-        (draw_x, strike_y, draw_x + tw, strike_y),
+        (
+            number_x,
+            strike_y,
+            number_x + number_w,
+            strike_y,
+        ),
         fill=_GRAY_TEXT,
         width=max(1, _scaled(_OLD_PRICE_STRIKE_WIDTH, scale)),
     )
-    return y + th
 
+    return y + max(label_h, number_h, currency_h)
 
 def draw_price_card(
     draw: ImageDraw.ImageDraw,
