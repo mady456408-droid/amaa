@@ -1084,7 +1084,13 @@ class Database:
         query += " ORDER BY sort_order ASC, id ASC"
         with self._connect() as conn:
             rows = conn.execute(query).fetchall()
-        return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+        logger.info("list_destinations(enabled_only=%s) returned %s destinations", enabled_only, len(result))
+        for dest in result:
+            logger.info("  - id=%s title=%s chat_id=%s enabled=%s sort_order=%s",
+                       dest.get("id"), dest.get("title"), dest.get("chat_id"),
+                       dest.get("enabled"), dest.get("sort_order"))
+        return result
 
     def update_destination(
         self,

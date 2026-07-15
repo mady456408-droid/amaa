@@ -77,12 +77,18 @@ async def publish_to_destinations(
     Returns:
         MultiPublishResult with results for each destination
     """
+    logger.info("publish_to_destinations: Starting with %s destinations", len(destinations))
+    for i, dest in enumerate(destinations):
+        logger.info("  [%s] destination_id=%s title=%s chat_id=%s enabled=%s",
+                   i, dest.get("id"), dest.get("title"), dest.get("chat_id"), dest.get("enabled"))
+
     results: list[PublishResult] = []
 
     for destination in destinations:
         try:
             logger.info(
-                "Publishing to destination: %s (chat_id=%s)",
+                "PUBLISH START destination_id=%s title=%s chat_id=%s",
+                destination["id"],
                 destination["title"],
                 destination["chat_id"],
             )
@@ -107,14 +113,17 @@ async def publish_to_destinations(
                 )
             )
             logger.info(
-                "✓ Published to %s (message_id=%s)",
+                "PUBLISH SUCCESS destination_id=%s title=%s chat_id=%s message_id=%s",
+                destination["id"],
                 destination["title"],
+                destination["chat_id"],
                 sent.message_id,
             )
         except Exception as e:
             error_msg = str(e)
             logger.exception(
-                "✗ Failed to publish to %s (chat_id=%s): %s",
+                "PUBLISH FAILURE destination_id=%s title=%s chat_id=%s error=%s",
+                destination["id"],
                 destination["title"],
                 destination["chat_id"],
                 error_msg,
@@ -129,4 +138,6 @@ async def publish_to_destinations(
                 )
             )
 
+    logger.info("publish_to_destinations: Completed. Total=%s Successful=%s Failed=%s",
+               len(results), sum(1 for r in results if r.success), sum(1 for r in results if not r.success))
     return MultiPublishResult(results)
