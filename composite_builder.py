@@ -9,6 +9,7 @@ from amazon_shortener import shorten_amazon_url
 from product_fetcher import fetch_product, resolve_display_url
 from link_resolver import build_clean_url, extract_asin, resolve_redirect
 from config import AMAZON_DOMAIN
+from file_cleanup import cleanup_files
 
 logger = logging.getLogger(__name__)
 
