@@ -10,6 +10,7 @@ from telegram_publisher import publish_to_channel_with_overflow
 from file_cleanup import cleanup_files
 from upload_prep import prepare_channel_upload
 from affiliate_tag import apply_affiliate_tag
+from link_resolver import build_clean_url
 from coupon_price import (
     apply_coupon_to_price,
     effective_coupon_for_caption,

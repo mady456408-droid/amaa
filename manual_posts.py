@@ -31,6 +31,13 @@ from link_resolver import (
 from ai_caption import build_product_caption
 from creators_title import resolve_frame_title
 from image_processor import CreatorsProductCard, apply_frame_creators_products
+from composite_builder import (
+    fetch_composite_entries,
+    build_composite_image,
+    build_composite_caption,
+    chunk_urls_for_composite,
+    get_composite_max_products,
+)
 from telegram_publisher import (
     build_caption,
     publish_to_channel_with_overflow,
@@ -50,7 +57,6 @@ CB_CANCEL = "cancel_draft:"
 
 UD_EDITING_DRAFT = "editing_draft_id"
 UD_MANUAL_MODE = "manual_mode"
-_COMPOSITE_MAX_PRODUCTS = 6
 
 
 def _extract_products_from_draft(draft: dict) -> list[dict]:
@@ -130,7 +136,7 @@ def _is_duplicate_draft(db: Database, draft: dict) -> bool:
 
 
 def _should_use_composite(inputs: list[str]) -> bool:
-    return FRAME_PRODUCT_IMAGES and 2 <= len(inputs) <= _COMPOSITE_MAX_PRODUCTS
+    return FRAME_PRODUCT_IMAGES and 2 <= len(inputs) <= get_composite_max_products()
 
 
 async def _build_product_caption_from_data(
@@ -207,119 +213,44 @@ async def prepare_composite_draft_from_inputs(
     db = application.bot_data["db"]
     browser = application.bot_data["browser"]
     coupon_enabled = db.get_coupon_detection_enabled()
-    temp_files: list[str] = []
-    entries: list[dict] = []
 
-    try:
-        for index, item in enumerate(inputs[:_COMPOSITE_MAX_PRODUCTS], start=1):
-            resolved = await resolve_asin_from_input(item)
-            if not resolved:
-                cleanup_files(temp_files)
-                return None
-
-            asin, clean_url = resolved
-            scrape_key = (
-                f"manual_{admin_id}_{message_id}_{index}_{int(time.time())}"
-            )
-            product = await fetch_product(
-                db,
-                browser,
-                asin,
-                clean_url,
-                scrape_key,
-                coupon_enabled=coupon_enabled,
-                frame_enabled=False,
-            )
-            if product["title"] == "Not found":
-                logger.warning(
-                    "Composite draft failed — title not found for asin=%s", asin
-                )
-                cleanup_files(temp_files)
-                if product.get("screenshot"):
-                    cleanup_files([product["screenshot"]])
-                return None
-
-            display_url = resolve_display_url(product, clean_url)
-            short_url = await shorten_amazon_url(display_url, db)
-            if short_url:
-                display_url = short_url
-
-            raw_image = product["screenshot"]
-            temp_files.append(raw_image)
-            frame_title = await resolve_frame_title(
-                asin, product["title"], db=db
-            )
-            entries.append(
-                {
-                    "asin": asin,
-                    "title": product["title"],
-                    "frame_title": frame_title,
-                    "price": product["price"],
-                    "list_price": product.get("list_price"),
-                    "display_url": display_url,
-                    "clean_url": clean_url,
-                    "image_path": raw_image,
-                    "product": product,
-                }
-            )
-
-        composite_key = (
-            f"manual_{admin_id}_{message_id}_composite_{int(time.time())}"
-        )
-        composite_path = f"{composite_key}_framed.png"
-        cards = [
-            CreatorsProductCard(
-                image_path=entry["image_path"],
-                title=entry["frame_title"],
-                price=entry["price"],
-            )
-            for entry in entries
-        ]
-        apply_frame_creators_products(composite_path, cards)
-        cleanup_files(temp_files)
-
-        caption_parts: list[str] = []
-        for entry in entries:
-            caption_parts.append(
-                await _build_product_caption_from_data(
-                    db,
-                    product=entry["product"],
-                    display_url=entry["display_url"],
-                    coupon_enabled=coupon_enabled,
-                )
-            )
-        caption = "\n\n".join(caption_parts)
-
-        asins = ",".join(entry["asin"].upper() for entry in entries)
-        combined_title = " | ".join(entry["title"] for entry in entries)
-
-        draft_id = db.create_draft_post(
-            asin=asins,
-            title=combined_title,
-            price=entries[0]["price"],
-            clean_url=entries[0]["clean_url"],
-            caption=caption,
-            image_path=composite_path,
-            created_by=admin_id,
-            coupon=None,
-            list_price=None,
-        )
-        draft = db.get_draft_post(draft_id)
-        logger.info("COMPOSITE DRAFT CREATED draft_id=%s asins=%s", draft_id, asins)
-        logger.info("DRAFT IMAGE RETAINED path=%s", composite_path)
-        return draft, composite_path
-    except RuntimeError as exc:
-        if "Screenshot generation failed" in str(exc):
-            logger.error("COMPOSITE DRAFT PREPARATION FAILED — screenshot missing")
-            cleanup_files(temp_files)
-            raise
-        logger.exception("Composite draft preparation failed")
-        cleanup_files(temp_files)
+    entries = await fetch_composite_entries(
+        db,
+        browser,
+        inputs,
+        coupon_enabled=coupon_enabled,
+        scrape_key_prefix="manual",
+        message_id=message_id,
+    )
+    if not entries:
         return None
-    except Exception:
-        logger.exception("Composite draft preparation failed")
-        cleanup_files(temp_files)
-        return None
+
+    composite_key = (
+        f"manual_{admin_id}_{message_id}_composite_{int(time.time())}"
+    )
+    composite_path = f"{composite_key}_framed.png"
+    build_composite_image(entries, composite_path)
+
+    caption = await build_composite_caption(db, entries, coupon_enabled)
+
+    asins = ",".join(entry["asin"].upper() for entry in entries)
+    combined_title = " | ".join(entry["title"] for entry in entries)
+
+    draft_id = db.create_draft_post(
+        asin=asins,
+        title=combined_title,
+        price=entries[0]["price"],
+        clean_url=entries[0]["clean_url"],
+        caption=caption,
+        image_path=composite_path,
+        created_by=admin_id,
+        coupon=None,
+        list_price=None,
+    )
+    draft = db.get_draft_post(draft_id)
+    logger.info("COMPOSITE DRAFT CREATED draft_id=%s asins=%s", draft_id, asins)
+    logger.info("DRAFT IMAGE RETAINED path=%s", composite_path)
+    return draft, composite_path
 
 
 async def prepare_draft_from_input(

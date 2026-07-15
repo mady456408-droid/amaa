@@ -12,6 +12,13 @@ from amazon_scraper import BrowserManager
 from amazon_shortener import shorten_amazon_url
 from creators_api import init_creators_client, shutdown_creators_client
 from product_fetcher import fetch_product, resolve_display_url
+from composite_builder import (
+    fetch_composite_entries,
+    build_composite_image,
+    build_composite_caption,
+    chunk_urls_for_composite,
+    get_composite_max_products,
+)
 from config import (
     ADMIN_USER_IDS,
     AMAZON_DOMAIN,
@@ -20,6 +27,7 @@ from config import (
     DEDUP_MAX_SIZE,
     DEDUP_TTL_SECONDS,
     DESTINATION_CHANNEL_ID,
+    FRAME_PRODUCT_IMAGES,
     LAST_PUBLISHED_LOOKBACK,
     PUBLISH_DELAY_SEC,
     SOURCE_CHANNEL_ID,
@@ -244,6 +252,99 @@ async def process_single_url(
             cleanup_files(list(temp_files))
 
 
+async def process_composite_urls(
+    application,
+    browser: BrowserManager,
+    db: Database,
+    destination_id: int,
+    urls: list[str],
+    msg: Message,
+    chunk_index: int,
+    total_chunks: int,
+) -> bool:
+    """Process 2-6 URLs as a single composite post. Returns True if published."""
+    message_id = msg.message_id
+    source_channel_id = msg.chat_id
+    coupon_enabled = db.get_coupon_detection_enabled()
+    temp_files: list[str] = []
+
+    try:
+        logger.info("PROCESSING COMPOSITE CHUNK %s/%s with %s URLs", chunk_index, total_chunks, len(urls))
+
+        entries = await fetch_composite_entries(
+            db,
+            browser,
+            urls,
+            coupon_enabled=coupon_enabled,
+            scrape_key_prefix="source",
+            message_id=message_id,
+        )
+        if not entries:
+            logger.warning("COMPOSITE CHUNK %s/%s failed — no entries", chunk_index, total_chunks)
+            return False
+
+        composite_key = f"source_{message_id}_composite_{chunk_index}_{int(time.time())}"
+        composite_path = f"{composite_key}_framed.png"
+        build_composite_image(entries, composite_path)
+        temp_files.append(composite_path)
+
+        caption = await build_composite_caption(db, entries, coupon_enabled)
+
+        upload_image = to_jpeg_for_telegram(composite_path)
+        if upload_image != composite_path:
+            temp_files.append(upload_image)
+
+        # Build inline keyboard
+        products = [{"title": entry["title"], "url": entry["display_url"]} for entry in entries]
+        fixed_buttons = db.list_fixed_buttons(enabled_only=True)
+        product_buttons_enabled = db.get_product_buttons_enabled()
+        fixed_position = db.get_fixed_buttons_position()
+        product_layout = db.get_product_button_layout()
+        product_template = db.get_product_button_template()
+        max_product_buttons = db.get_max_product_buttons()
+        inline_keyboard = build_inline_keyboard(
+            products,
+            fixed_buttons,
+            product_buttons_enabled,
+            fixed_buttons_position=fixed_position,
+            product_button_layout=product_layout,
+            product_button_template=product_template,
+            max_product_buttons=max_product_buttons,
+        )
+
+        sent = await publish_to_channel_with_overflow(
+            application.bot,
+            destination_id,
+            upload_image,
+            caption,
+            reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
+            products=products,
+            parse_mode="HTML",
+        )
+
+        # Add all products to published_products
+        for entry in entries:
+            price_fields = extract_published_price_fields(
+                entry["product"]["price"],
+                entry["product"].get("list_price"),
+            )
+            db.add_published_product(
+                entry["asin"],
+                entry["title"],
+                source_channel_id,
+                sent.message_id,
+                **price_fields,
+            )
+
+        logger.info("COMPOSITE PUBLISHED chunk=%s/%s asins=%s", chunk_index, total_chunks, ",".join(e["asin"] for e in entries))
+        cleanup_files(temp_files)
+        return True
+    except Exception:
+        logger.exception("COMPOSITE CHUNK FAILED chunk=%s/%s", chunk_index, total_chunks)
+        cleanup_files(temp_files)
+        return False
+
+
 async def process_message(application, msg: Message) -> None:
     message_id = msg.message_id
     dedup: TTLCache = application.bot_data["dedup"]
@@ -275,21 +376,74 @@ async def process_message(application, msg: Message) -> None:
     published = 0
     t_total = time.perf_counter()
 
-    for index, url in enumerate(urls, start=1):
-        ok = await process_single_url(
+    # Check if composite should be used
+    use_composite = FRAME_PRODUCT_IMAGES and 2 <= total <= get_composite_max_products()
+
+    if use_composite:
+        logger.info("USING COMPOSITE MODE for %s URLs", total)
+        ok = await process_composite_urls(
             application,
             browser,
             db,
             destination_id,
-            url,
+            urls,
             msg,
-            index,
-            total,
+            chunk_index=1,
+            total_chunks=1,
         )
         if ok:
-            published += 1
-            if index < total and PUBLISH_DELAY_SEC > 0:
-                await asyncio.sleep(PUBLISH_DELAY_SEC)
+            published = 1
+    else:
+        # Single product mode or too many products - chunk and process individually
+        if total > get_composite_max_products():
+            logger.info("TOO MANY URLS (%s) - chunking for composite processing", total)
+            url_chunks = chunk_urls_for_composite(urls)
+            for chunk_index, chunk in enumerate(url_chunks, start=1):
+                if len(chunk) >= 2:
+                    ok = await process_composite_urls(
+                        application,
+                        browser,
+                        db,
+                        destination_id,
+                        chunk,
+                        msg,
+                        chunk_index,
+                        len(url_chunks),
+                    )
+                else:
+                    # Single URL in chunk - use single product pipeline
+                    for url in chunk:
+                        ok = await process_single_url(
+                            application,
+                            browser,
+                            db,
+                            destination_id,
+                            url,
+                            msg,
+                            published + 1,
+                            len(chunk),
+                        )
+                if ok:
+                    published += 1
+                if chunk_index < len(url_chunks) and PUBLISH_DELAY_SEC > 0:
+                    await asyncio.sleep(PUBLISH_DELAY_SEC)
+        else:
+            # Single product or composite disabled - process individually
+            for index, url in enumerate(urls, start=1):
+                ok = await process_single_url(
+                    application,
+                    browser,
+                    db,
+                    destination_id,
+                    url,
+                    msg,
+                    index,
+                    total,
+                )
+                if ok:
+                    published += 1
+                    if index < total and PUBLISH_DELAY_SEC > 0:
+                        await asyncio.sleep(PUBLISH_DELAY_SEC)
 
     logger.info("PUBLISHED %s/%s", published, total)
     logger.info(

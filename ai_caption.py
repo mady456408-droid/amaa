@@ -261,7 +261,7 @@ async def rewrite_caption(
         price_result = apply_coupon_to_price(price, coupon, **ck)
         effective = effective_coupon_for_caption(coupon, price_result)
         parts = [
-            f"🔥 عرض على {title}",
+            f" عرض على {title}",
             "",
             format_arabic_price_line(
                 price,
