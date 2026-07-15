@@ -7,7 +7,7 @@ from image_processor import CreatorsProductCard, apply_frame_creators_products
 from creators_title import resolve_frame_title
 from amazon_shortener import shorten_amazon_url
 from product_fetcher import fetch_product, resolve_display_url
-from link_resolver import build_clean_url, extract_asin, resolve_redirect
+from link_resolver import build_clean_url, extract_asin, resolve_redirect, is_standalone_asin
 from config import AMAZON_DOMAIN
 from file_cleanup import cleanup_files
 
@@ -17,14 +17,22 @@ _COMPOSITE_MAX_PRODUCTS = 6
 
 
 async def resolve_asin_from_url(item: str) -> tuple[str, str] | None:
-    """Return (asin, clean_url) from URL or redirect URL."""
+    """Return (asin, clean_url) from URL, redirect URL, or plain ASIN."""
     logger.info("RESOLVING URL: %s", item)
 
+    # Check if input is already a plain ASIN
+    asin = is_standalone_asin(item)
+    if asin:
+        logger.info("PLAIN ASIN DETECTED: %s", asin)
+        return asin, build_clean_url(asin, AMAZON_DOMAIN)
+
+    # Try to extract ASIN from URL
     asin = extract_asin(item)
     if asin:
         logger.info("ASIN EXTRACTED: %s", asin)
         return asin, build_clean_url(asin, AMAZON_DOMAIN)
 
+    # Try to resolve redirect
     try:
         final_url = await resolve_redirect(item)
     except Exception:
