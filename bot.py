@@ -271,7 +271,7 @@ async def process_composite_urls(
     try:
         logger.info("PROCESSING COMPOSITE CHUNK %s/%s with %s URLs", chunk_index, total_chunks, len(urls))
 
-        entries = await fetch_composite_entries(
+        entries, raw_temp_files = await fetch_composite_entries(
             db,
             browser,
             urls,
@@ -286,6 +286,7 @@ async def process_composite_urls(
         composite_key = f"source_{message_id}_composite_{chunk_index}_{int(time.time())}"
         composite_path = f"{composite_key}_framed.png"
         build_composite_image(entries, composite_path)
+        cleanup_files(raw_temp_files)
         temp_files.append(composite_path)
 
         caption = await build_composite_caption(db, entries, coupon_enabled)

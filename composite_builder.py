@@ -50,8 +50,12 @@ async def fetch_composite_entries(
     coupon_enabled: bool,
     scrape_key_prefix: str,
     message_id: int,
-) -> list[dict] | None:
-    """Fetch products for composite from URLs. Returns list of entries or None on failure."""
+) -> tuple[list[dict] | None, list[str]]:
+    """Fetch products for composite from URLs.
+
+    Returns (entries, temp_files) where temp_files contains raw image paths
+    that must be cleaned up by the caller after building the composite.
+    """
     temp_files: list[str] = []
     entries: list[dict] = []
 
@@ -60,7 +64,7 @@ async def fetch_composite_entries(
             resolved = await resolve_asin_from_url(url)
             if not resolved:
                 cleanup_files(temp_files)
-                return None
+                return None, []
 
             asin, clean_url = resolved
             scrape_key = f"{scrape_key_prefix}_{message_id}_{index}_{int(time.time())}"
@@ -80,7 +84,7 @@ async def fetch_composite_entries(
                 cleanup_files(temp_files)
                 if product.get("screenshot"):
                     cleanup_files([product["screenshot"]])
-                return None
+                return None, []
 
             display_url = resolve_display_url(product, clean_url)
             short_url = await shorten_amazon_url(display_url, db)
@@ -106,8 +110,7 @@ async def fetch_composite_entries(
                 }
             )
 
-        cleanup_files(temp_files)
-        return entries
+        return entries, temp_files
     except RuntimeError as exc:
         if "Screenshot generation failed" in str(exc):
             logger.error("COMPOSITE ENTRY FETCH FAILED — screenshot missing")
@@ -115,11 +118,11 @@ async def fetch_composite_entries(
             raise
         logger.exception("Composite entry fetch failed")
         cleanup_files(temp_files)
-        return None
+        return None, []
     except Exception:
         logger.exception("Composite entry fetch failed")
         cleanup_files(temp_files)
-        return None
+        return None, []
 
 
 def build_composite_image(entries: list[dict], output_path: str) -> None:

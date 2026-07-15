@@ -214,7 +214,7 @@ async def prepare_composite_draft_from_inputs(
     browser = application.bot_data["browser"]
     coupon_enabled = db.get_coupon_detection_enabled()
 
-    entries = await fetch_composite_entries(
+    entries, temp_files = await fetch_composite_entries(
         db,
         browser,
         inputs,
@@ -230,6 +230,7 @@ async def prepare_composite_draft_from_inputs(
     )
     composite_path = f"{composite_key}_framed.png"
     build_composite_image(entries, composite_path)
+    cleanup_files(temp_files)
 
     caption = await build_composite_caption(db, entries, coupon_enabled)
 
