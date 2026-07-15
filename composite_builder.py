@@ -63,72 +63,108 @@ async def fetch_composite_entries(
 
     Returns (entries, temp_files) where temp_files contains raw image paths
     that must be cleaned up by the caller after building the composite.
+    
+    Fault-tolerant: continues processing remaining URLs if individual URLs fail.
+    Only returns None if no entries were successfully fetched.
     """
     temp_files: list[str] = []
     entries: list[dict] = []
+    urls_found = len(urls[:_COMPOSITE_MAX_PRODUCTS])
+    urls_resolved = 0
+    urls_fetched = 0
+    urls_skipped = 0
 
     try:
         for index, url in enumerate(urls[:_COMPOSITE_MAX_PRODUCTS], start=1):
-            resolved = await resolve_asin_from_url(url)
-            if not resolved:
-                cleanup_files(temp_files)
-                return None, []
+            try:
+                resolved = await resolve_asin_from_url(url)
+                if not resolved:
+                    logger.warning(
+                        "Composite entry #%d skipped — URL resolution failed: %s", index, url
+                    )
+                    urls_skipped += 1
+                    continue
 
-            asin, clean_url = resolved
-            scrape_key = f"{scrape_key_prefix}_{message_id}_{index}_{int(time.time())}"
-            product = await fetch_product(
-                db,
-                browser,
-                asin,
-                clean_url,
-                scrape_key,
-                coupon_enabled=coupon_enabled,
-                frame_enabled=False,
-            )
-            if product["title"] == "Not found":
-                logger.warning(
-                    "Composite entry failed — title not found for asin=%s", asin
+                asin, clean_url = resolved
+                urls_resolved += 1
+                scrape_key = f"{scrape_key_prefix}_{message_id}_{index}_{int(time.time())}"
+                product = await fetch_product(
+                    db,
+                    browser,
+                    asin,
+                    clean_url,
+                    scrape_key,
+                    coupon_enabled=coupon_enabled,
+                    frame_enabled=False,
                 )
-                cleanup_files(temp_files)
-                if product.get("screenshot"):
-                    cleanup_files([product["screenshot"]])
-                return None, []
+                if product["title"] == "Not found":
+                    logger.warning(
+                        "Composite entry #%d skipped — title not found for asin=%s", index, asin
+                    )
+                    urls_skipped += 1
+                    if product.get("screenshot"):
+                        cleanup_files([product["screenshot"]])
+                    continue
 
-            display_url = resolve_display_url(product, clean_url)
-            short_url = await shorten_amazon_url(display_url, db)
-            if short_url:
-                display_url = short_url
+                display_url = resolve_display_url(product, clean_url)
+                short_url = await shorten_amazon_url(display_url, db)
+                if short_url:
+                    display_url = short_url
 
-            raw_image = product["screenshot"]
-            temp_files.append(raw_image)
-            frame_title = await resolve_frame_title(
-                asin, product["title"], db=db
-            )
-            entries.append(
-                {
-                    "asin": asin,
-                    "title": product["title"],
-                    "frame_title": frame_title,
-                    "price": product["price"],
-                    "list_price": product.get("list_price"),
-                    "display_url": display_url,
-                    "clean_url": clean_url,
-                    "image_path": raw_image,
-                    "product": product,
-                }
-            )
+                raw_image = product["screenshot"]
+                temp_files.append(raw_image)
+                frame_title = await resolve_frame_title(
+                    asin, product["title"], db=db
+                )
+                entries.append(
+                    {
+                        "asin": asin,
+                        "title": product["title"],
+                        "frame_title": frame_title,
+                        "price": product["price"],
+                        "list_price": product.get("list_price"),
+                        "display_url": display_url,
+                        "clean_url": clean_url,
+                        "image_path": raw_image,
+                        "product": product,
+                    }
+                )
+                urls_fetched += 1
+
+            except RuntimeError as exc:
+                if "Screenshot generation failed" in str(exc):
+                    logger.error(
+                        "Composite entry #%d skipped — screenshot generation failed: %s", index, url
+                    )
+                    urls_skipped += 1
+                    continue
+                logger.warning(
+                    "Composite entry #%d skipped — RuntimeError: %s", index, str(exc)
+                )
+                urls_skipped += 1
+                continue
+            except Exception:
+                logger.exception(
+                    "Composite entry #%d skipped — unexpected error: %s", index, url
+                )
+                urls_skipped += 1
+                continue
+
+        # Log composite summary
+        logger.info(
+            "Composite Summary: URLs found=%d, Resolved=%d, Fetched=%d, Skipped=%d, Published=%d",
+            urls_found, urls_resolved, urls_fetched, urls_skipped, urls_fetched
+        )
+
+        # Only return None if no entries were successfully fetched
+        if not entries:
+            logger.warning("Composite aborted — no valid entries fetched")
+            cleanup_files(temp_files)
+            return None, []
 
         return entries, temp_files
-    except RuntimeError as exc:
-        if "Screenshot generation failed" in str(exc):
-            logger.error("COMPOSITE ENTRY FETCH FAILED — screenshot missing")
-            cleanup_files(temp_files)
-            raise
-        logger.exception("Composite entry fetch failed")
-        cleanup_files(temp_files)
-        return None, []
     except Exception:
-        logger.exception("Composite entry fetch failed")
+        logger.exception("Composite entry fetch failed — unexpected error")
         cleanup_files(temp_files)
         return None, []
 

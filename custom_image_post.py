@@ -312,7 +312,7 @@ async def handle_custom_publish(
             publish_path,
             draft["caption"],
             reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
-            product_count=0,  # Custom image posts have no products
+            products=None,  # Custom image posts have no products
             parse_mode="HTML",
         )
         
