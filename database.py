@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import sqlite3
@@ -20,6 +21,11 @@ SETTING_PRODUCT_BUTTON_LAYOUT = "product_button_layout"
 SETTING_PRODUCT_BUTTON_TEMPLATE = "product_button_template"
 SETTING_MAX_PRODUCT_BUTTONS = "max_product_buttons"
 SETTING_MIN_PRICE_DROP = "min_price_drop"
+SETTING_GEMINI_ENABLED = "gemini_enabled"
+SETTING_GEMINI_MODEL = "gemini_model"
+SETTING_GEMINI_SYSTEM_PROMPT = "gemini_system_prompt"
+SETTING_GEMINI_TEMPERATURE = "gemini_temperature"
+SETTING_GEMINI_MAX_TOKENS = "gemini_max_tokens"
 
 
 class Database:
@@ -234,6 +240,17 @@ class Database:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS gemini_rewrite_cache (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    caption_hash TEXT NOT NULL UNIQUE,
+                    original_caption TEXT NOT NULL,
+                    rewritten_caption TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
 
     def seed_from_env(self, source_channel_id: int, destination_channel_id: int) -> None:
@@ -439,6 +456,101 @@ class Database:
     def set_min_price_drop(self, value: int) -> None:
         clamped = max(1, min(10000, value))
         self.set_setting(SETTING_MIN_PRICE_DROP, str(clamped))
+
+    # --- Gemini AI Rewrite Settings ---
+
+    def get_gemini_enabled(self) -> bool:
+        return self.get_setting(SETTING_GEMINI_ENABLED) == "1"
+
+    def set_gemini_enabled(self, enabled: bool) -> None:
+        self.set_setting(SETTING_GEMINI_ENABLED, "1" if enabled else "0")
+
+    def get_gemini_model(self) -> str:
+        return self.get_setting(SETTING_GEMINI_MODEL) or "gemini-2.5-flash"
+
+    def set_gemini_model(self, model: str) -> None:
+        self.set_setting(SETTING_GEMINI_MODEL, model)
+
+    def get_gemini_system_prompt(self) -> str:
+        return self.get_setting(SETTING_GEMINI_SYSTEM_PROMPT) or ""
+
+    def set_gemini_system_prompt(self, prompt: str) -> None:
+        self.set_setting(SETTING_GEMINI_SYSTEM_PROMPT, prompt)
+
+    def get_gemini_temperature(self) -> float:
+        raw = self.get_setting(SETTING_GEMINI_TEMPERATURE)
+        if raw is None:
+            return 0.7  # Default
+        try:
+            val = float(raw)
+            return max(0.0, min(2.0, val))  # Clamp between 0.0 and 2.0
+        except ValueError:
+            return 0.7
+
+    def set_gemini_temperature(self, temperature: float) -> None:
+        clamped = max(0.0, min(2.0, temperature))
+        self.set_setting(SETTING_GEMINI_TEMPERATURE, str(clamped))
+
+    def get_gemini_max_tokens(self) -> int:
+        raw = self.get_setting(SETTING_GEMINI_MAX_TOKENS)
+        if raw is None:
+            return 1024  # Default
+        try:
+            val = int(raw)
+            return max(1, min(8192, val))  # Clamp between 1 and 8192
+        except ValueError:
+            return 1024
+
+    def set_gemini_max_tokens(self, max_tokens: int) -> None:
+        clamped = max(1, min(8192, max_tokens))
+        self.set_setting(SETTING_GEMINI_MAX_TOKENS, str(clamped))
+
+    # --- Gemini Rewrite Cache ---
+
+    def _hash_caption(self, caption: str) -> str:
+        """Generate SHA256 hash of caption for cache key."""
+        return hashlib.sha256(caption.encode("utf-8")).hexdigest()
+
+    def get_gemini_rewrite_cache(self, caption: str) -> str | None:
+        """Get cached rewritten caption if exists."""
+        caption_hash = self._hash_caption(caption)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT rewritten_caption FROM gemini_rewrite_cache WHERE caption_hash = ?",
+                (caption_hash,),
+            ).fetchone()
+        return row["rewritten_caption"] if row else None
+
+    def set_gemini_rewrite_cache(self, original_caption: str, rewritten_caption: str) -> None:
+        """Cache a rewritten caption."""
+        caption_hash = self._hash_caption(original_caption)
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO gemini_rewrite_cache (caption_hash, original_caption, rewritten_caption, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(caption_hash) DO UPDATE SET
+                    original_caption = excluded.original_caption,
+                    rewritten_caption = excluded.rewritten_caption,
+                    created_at = excluded.created_at
+                """,
+                (caption_hash, original_caption, rewritten_caption, now),
+            )
+            conn.commit()
+
+    def clear_gemini_rewrite_cache(self) -> int:
+        """Clear all gemini rewrite cache entries. Returns number of rows deleted."""
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM gemini_rewrite_cache")
+            conn.commit()
+            return cur.rowcount
+
+    def get_gemini_cache_size(self) -> int:
+        """Get current cache size (number of entries)."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) as count FROM gemini_rewrite_cache").fetchone()
+        return row["count"] if row else 0
 
     def get_last_published_asins(self, limit: int = 10) -> set[str]:
         with self._connect() as conn:

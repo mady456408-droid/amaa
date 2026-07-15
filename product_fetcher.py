@@ -271,6 +271,253 @@ def _merge_coupon_data(product: dict, scan: dict | None) -> None:
         product["list_price"] = scan["list_price"]
 
 
+async def fetch_products(
+    db,
+    browser: BrowserManager | None,
+    asins: list[str],
+    clean_urls: dict[str, str],
+    scrape_key_prefix: str,
+    *,
+    coupon_enabled: bool,
+    frame_enabled: bool = FRAME_PRODUCT_IMAGES,
+) -> dict[str, dict]:
+    """
+    Fetch multiple products using bulk Creators API GetItems requests.
+
+    Args:
+        asins: List of ASINs to fetch (1-10, or more with auto-chunking)
+        clean_urls: Dict mapping ASIN -> clean_url for each ASIN
+        scrape_key_prefix: Prefix for scrape keys (unique per ASIN will be added)
+        coupon_enabled: Whether coupon detection is enabled
+        frame_enabled: Whether product framing is enabled
+
+    Returns:
+        Dict mapping ASIN -> product dict (same format as fetch_product)
+
+    Features:
+        - Removes duplicates automatically
+        - Preserves input order
+        - Ignores invalid ASINs
+        - Continues processing if one ASIN fails
+        - Automatic chunking for >10 ASINs (max 10 per API request)
+        - Single OAuth token for entire batch
+        - Performance logging
+    """
+    import time
+
+    start_time = time.monotonic()
+    client = get_creators_client()
+
+    # Normalize and deduplicate ASINs while preserving order
+    seen = set()
+    unique_asins = []
+    for asin in asins:
+        normalized = asin.strip().upper()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            unique_asins.append(normalized)
+
+    if not unique_asins:
+        logger.info("BULK GETITEMS: no valid ASINs provided")
+        return {}
+
+    requested = len(unique_asins)
+    results: dict[str, dict] = {}
+    failed = 0
+    api_calls = 0
+
+    # Chunk into groups of 10 (Creators API limit)
+    chunk_size = 10
+    chunks = [
+        unique_asins[i : i + chunk_size]
+        for i in range(0, len(unique_asins), chunk_size)
+    ]
+
+    logger.info(
+        "BULK GETITEMS: requested=%d chunks=%d",
+        requested,
+        len(chunks),
+    )
+
+    for chunk_index, chunk_asins in enumerate(chunks, start=1):
+        api_calls += 1
+        chunk_results: dict[str, dict] = {}
+
+        # Try Creators API first
+        if client and creators_api_configured():
+            try:
+                items = await client.get_items(
+                    chunk_asins,
+                    DRAFT_PROFILE,
+                    db=db,
+                    profile="draft",
+                )
+
+                # Process each ASIN in the chunk
+                for asin in chunk_asins:
+                    item = items.get(asin)
+                    if item and item.title != "Not found":
+                        clean_url = clean_urls.get(asin, "")
+                        scrape_key = f"{scrape_key_prefix}_{asin}_{int(time.time() * 1000)}"
+                        coupon_scan: dict | None = None
+
+                        product: dict = {
+                            "asin": asin,
+                            "title": item.title,
+                            "price": item.price,
+                            "list_price": item.list_price,
+                            "image_url": item.image_url,
+                            "detail_page_url": item.detail_page_url,
+                            "features": item.features,
+                            "coupon": None,
+                            "coupon_already_applied": False,
+                            "data_source": "creators",
+                            "screenshot": None,
+                        }
+
+                        if coupon_enabled and browser is not None:
+                            logger.info("COUPON SCAN START asin=%s", asin)
+                            coupon_scan = await scrape_coupon_and_screenshot(
+                                browser,
+                                clean_url,
+                                scrape_key,
+                                coupon_detection_enabled=True,
+                                capture_screenshot=frame_enabled,
+                            )
+                            _merge_coupon_data(product, coupon_scan)
+
+                        frame_title = await resolve_frame_title(asin, item.title, db=db)
+
+                        try:
+                            product["screenshot"] = await _resolve_product_image(
+                                browser,
+                                asin=asin,
+                                clean_url=clean_url,
+                                scrape_key=scrape_key,
+                                image_url=item.image_url,
+                                frame_enabled=frame_enabled,
+                                coupon_enabled=coupon_enabled,
+                                coupon_scan=coupon_scan,
+                                title=frame_title,
+                                price=item.price,
+                                list_price=item.list_price,
+                                prime_exclusive=item.prime_exclusive,
+                                db=db,
+                            )
+                            chunk_results[asin] = product
+                        except RuntimeError as exc:
+                            logger.warning(
+                                "BULK GETITEMS: image resolution failed for asin=%s: %s",
+                                asin,
+                                exc,
+                            )
+                            failed += 1
+                        except Exception:
+                            logger.exception(
+                                "BULK GETITEMS: unexpected error for asin=%s",
+                                asin,
+                            )
+                            failed += 1
+                    else:
+                        logger.warning(
+                            "BULK GETITEMS: item not found for asin=%s",
+                            asin,
+                        )
+                        failed += 1
+
+                logger.info(
+                    "BULK GETITEMS: chunk %d/%d returned=%d",
+                    chunk_index,
+                    len(chunks),
+                    len(chunk_results),
+                )
+
+            except CreatorsAPIError as exc:
+                logger.warning(
+                    "BULK GETITEMS: Creators API failed for chunk %d/%d: %s",
+                    chunk_index,
+                    len(chunks),
+                    exc,
+                )
+                # Fall through to Playwright for this chunk
+            except Exception:
+                logger.exception(
+                    "BULK GETITEMS: unexpected error for chunk %d/%d",
+                    chunk_index,
+                    len(chunks),
+                )
+                # Fall through to Playwright for this chunk
+        else:
+            logger.info("BULK GETITEMS: Creators API not configured, using Playwright")
+
+        # Playwright fallback for ASINs not fetched via Creators API
+        if browser is None:
+            logger.warning(
+                "BULK GETITEMS: Playwright browser not available, skipping failed ASINs in chunk %d",
+                chunk_index,
+            )
+            for asin in chunk_asins:
+                if asin not in chunk_results:
+                    failed += 1
+        else:
+            for asin in chunk_asins:
+                if asin not in chunk_results:
+                    clean_url = clean_urls.get(asin, "")
+                    scrape_key = f"{scrape_key_prefix}_{asin}_{int(time.time() * 1000)}"
+                    try:
+                        logger.info(
+                            "BULK GETITEMS: Playwright fallback for asin=%s",
+                            asin,
+                        )
+                        product = await scrape_amazon(
+                            browser,
+                            clean_url,
+                            scrape_key,
+                            coupon_detection_enabled=coupon_enabled,
+                        )
+                        product["data_source"] = "playwright"
+                        product["image_url"] = None
+                        product["detail_page_url"] = ""
+                        product["asin"] = asin
+
+                        if frame_enabled and product.get("screenshot"):
+                            framed = _maybe_apply_frame(
+                                product["screenshot"],
+                                f"{scrape_key}_framed.png",
+                                asin=asin,
+                                frame_enabled=True,
+                            )
+                            product["screenshot"] = _require_screenshot(framed, asin=asin)
+                        else:
+                            product["screenshot"] = _require_screenshot(
+                                product.get("screenshot"), asin=asin
+                            )
+
+                        chunk_results[asin] = product
+                    except Exception:
+                        logger.exception(
+                            "BULK GETITEMS: Playwright fallback failed for asin=%s",
+                            asin,
+                        )
+                        failed += 1
+
+        results.update(chunk_results)
+
+    elapsed_ms = (time.monotonic() - start_time) * 1000
+    returned = len(results)
+
+    logger.info(
+        "BULK GETITEMS: requested=%d returned=%d failed=%d api_calls=%d time_ms=%.0f",
+        requested,
+        returned,
+        failed,
+        api_calls,
+        elapsed_ms,
+    )
+
+    return results
+
+
 async def fetch_product(
     db,
     browser: BrowserManager | None,

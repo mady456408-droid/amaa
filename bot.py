@@ -62,6 +62,7 @@ from telegram_publisher import build_caption, publish_to_channel_with_overflow
 from published_price import extract_published_price_fields
 from backup_restore import maybe_notify_restore_complete
 from inline_buttons import build_inline_keyboard
+from gemini_rewriter import rewrite_caption
 from upload_prep import to_jpeg_for_telegram
 
 logging.basicConfig(
@@ -157,6 +158,13 @@ async def process_single_url(
                 coupon=coupon,
                 product=product,
             )
+
+        # Apply Gemini AI rewrite if enabled and this is a single ASIN source post
+        # (Composite posts and multi-product posts do not use Gemini)
+        # process_single_url is only called for single URLs, so this is guaranteed to be one product
+        if db.get_gemini_enabled():
+            caption = rewrite_caption(caption, db, log_prefix="SOURCE POST")
+
         upload_image = to_jpeg_for_telegram(product["screenshot"])
         if upload_image != product["screenshot"]:
             temp_files.append(upload_image)

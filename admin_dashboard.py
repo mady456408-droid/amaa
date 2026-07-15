@@ -43,6 +43,7 @@ from conversation_states import (
     AWAIT_FIXED_BUTTON_URL,
     AWAIT_DESTINATION_TITLE,
     AWAIT_DESTINATION_CHAT_ID,
+    AWAIT_GEMINI_SYSTEM_PROMPT,
 )
 from telethon_auth import (
     AUTH_STATE_CODE,
@@ -146,6 +147,16 @@ CB_DESTINATIONS_UP = "adm:destinations:up:"
 CB_DESTINATIONS_DOWN = "adm:destinations:down:"
 CB_DESTINATIONS_AWAIT_TITLE = "adm:destinations:await_title"
 CB_DESTINATIONS_AWAIT_CHAT_ID = "adm:destinations:await_chat_id"
+CB_GEMINI = "adm:gemini"
+CB_GEMINI_ENABLE = "adm:gemini:enable"
+CB_GEMINI_DISABLE = "adm:gemini:disable"
+CB_GEMINI_EDIT_PROMPT = "adm:gemini:edit_prompt"
+CB_GEMINI_PREVIEW_PROMPT = "adm:gemini:preview_prompt"
+CB_GEMINI_MODEL = "adm:gemini:model"
+CB_GEMINI_TEMPERATURE = "adm:gemini:temperature"
+CB_GEMINI_MAX_TOKENS = "adm:gemini:max_tokens"
+CB_GEMINI_TEST_REWRITE = "adm:gemini:test_rewrite"
+CB_GEMINI_CLEAR_CACHE = "adm:gemini:clear_cache"
 
 UD_PENDING_RESTORE = "pending_restore_zip"
 
@@ -204,6 +215,9 @@ def _main_keyboard(paused: bool, telethon_connected: bool = True) -> InlineKeybo
             [
                 InlineKeyboardButton("🛠 Manual Post", callback_data=CB_MANUAL),
                 InlineKeyboardButton("🤖 AI Caption", callback_data=CB_AI),
+            ],
+            [
+                InlineKeyboardButton("🤖 Gemini AI", callback_data=CB_GEMINI),
             ],
             [
                 InlineKeyboardButton("🖼 Custom Image Post", callback_data=CB_CUSTOM_IMAGE_POST),
@@ -585,6 +599,55 @@ def _coupon_detection_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("✅ Coupon Detection ON", callback_data=CB_COUPON_ON)],
             [InlineKeyboardButton("❌ Coupon Detection OFF", callback_data=CB_COUPON_OFF)],
+            [InlineKeyboardButton("« Back", callback_data=CB_MAIN)],
+        ]
+    )
+
+
+def _gemini_menu_text(db: Database) -> str:
+    enabled = db.get_gemini_enabled()
+    model = db.get_gemini_model()
+    temperature = db.get_gemini_temperature()
+    max_tokens = db.get_gemini_max_tokens()
+    cache_size = db.get_gemini_cache_size()
+    status = "✅ ON" if enabled else "❌ OFF"
+    return (
+        f"🤖 <b>Gemini AI Rewrite</b>\n\n"
+        f"Status: <b>{status}</b>\n"
+        f"Model: <code>{model}</code>\n"
+        f"Temperature: <code>{temperature}</code>\n"
+        f"Max Tokens: <code>{max_tokens}</code>\n"
+        f"Cache Size: <code>{cache_size}</code> entries\n\n"
+        f"Rewrite captions using Google Gemini AI.\n"
+        f"Configure the system prompt and model settings below."
+    )
+
+
+def _gemini_keyboard(db: Database) -> InlineKeyboardMarkup:
+    enabled = db.get_gemini_enabled()
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Enable" if not enabled else "❌ Disable",
+                    callback_data=CB_GEMINI_ENABLE if not enabled else CB_GEMINI_DISABLE,
+                ),
+            ],
+            [
+                InlineKeyboardButton("📝 Edit System Prompt", callback_data=CB_GEMINI_EDIT_PROMPT),
+                InlineKeyboardButton("👁 Preview Prompt", callback_data=CB_GEMINI_PREVIEW_PROMPT),
+            ],
+            [
+                InlineKeyboardButton("🧠 Model", callback_data=CB_GEMINI_MODEL),
+                InlineKeyboardButton("🌡 Temperature", callback_data=CB_GEMINI_TEMPERATURE),
+            ],
+            [
+                InlineKeyboardButton("📏 Max Tokens", callback_data=CB_GEMINI_MAX_TOKENS),
+            ],
+            [
+                InlineKeyboardButton("🧪 Test Rewrite", callback_data=CB_GEMINI_TEST_REWRITE),
+                InlineKeyboardButton("🧹 Clear Cache", callback_data=CB_GEMINI_CLEAR_CACHE),
+            ],
             [InlineKeyboardButton("« Back", callback_data=CB_MAIN)],
         ]
     )
@@ -1397,6 +1460,142 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return ConversationHandler.END
 
+    if data == CB_GEMINI:
+        await _safe_edit_message_text(
+            query,
+            _gemini_menu_text(db),
+            reply_markup=_gemini_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_GEMINI_ENABLE:
+        db.set_gemini_enabled(True)
+        await _safe_edit_message_text(
+            query,
+            _gemini_menu_text(db),
+            reply_markup=_gemini_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_GEMINI_DISABLE:
+        db.set_gemini_enabled(False)
+        await _safe_edit_message_text(
+            query,
+            _gemini_menu_text(db),
+            reply_markup=_gemini_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_GEMINI_EDIT_PROMPT:
+        await _safe_edit_message_text(
+            query,
+            "📝 <b>Edit System Prompt</b>\n\n"
+            "Send your new system prompt.\n"
+            "The next message you send will become the new system prompt.\n\n"
+            "Supports Arabic and English.\n"
+            "Preserves line breaks exactly.\n\n"
+            "/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return AWAIT_GEMINI_SYSTEM_PROMPT
+
+    if data == CB_GEMINI_PREVIEW_PROMPT:
+        prompt = db.get_gemini_system_prompt()
+        if not prompt:
+            preview = "(No system prompt set)"
+        else:
+            preview = prompt[:1000] + ("…" if len(prompt) > 1000 else "")
+        await _safe_edit_message_text(
+            query,
+            f"👁 <b>System Prompt Preview</b>\n\n"
+            f"<code>{preview}</code>",
+            reply_markup=_gemini_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_GEMINI_MODEL:
+        current_model = db.get_gemini_model()
+        context.user_data["gemini_setting"] = "model"
+        await _safe_edit_message_text(
+            query,
+            f"🧠 <b>Gemini Model</b>\n\n"
+            f"Current: <code>{current_model}</code>\n\n"
+            "Send new model name (e.g., gemini-1.5-flash, gemini-1.5-pro).\n\n"
+            "/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return AWAIT_GEMINI_SYSTEM_PROMPT  # Reuse state for text input
+
+    if data == CB_GEMINI_TEMPERATURE:
+        current_temp = db.get_gemini_temperature()
+        context.user_data["gemini_setting"] = "temperature"
+        await _safe_edit_message_text(
+            query,
+            f"🌡 <b>Temperature</b>\n\n"
+            f"Current: <code>{current_temp}</code>\n\n"
+            "Send new temperature (0.0 to 2.0).\n"
+            "Lower = more focused, Higher = more creative.\n\n"
+            "/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return AWAIT_GEMINI_SYSTEM_PROMPT  # Reuse state for text input
+
+    if data == CB_GEMINI_MAX_TOKENS:
+        current_tokens = db.get_gemini_max_tokens()
+        context.user_data["gemini_setting"] = "max_tokens"
+        await _safe_edit_message_text(
+            query,
+            f"📏 <b>Max Tokens</b>\n\n"
+            f"Current: <code>{current_tokens}</code>\n\n"
+            "Send new max tokens (1 to 8192).\n\n"
+            "/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return AWAIT_GEMINI_SYSTEM_PROMPT  # Reuse state for text input
+
+    if data == CB_GEMINI_TEST_REWRITE:
+        context.user_data["gemini_setting"] = "test_rewrite"
+        await _safe_edit_message_text(
+            query,
+            "🧪 <b>Test Rewrite</b>\n\n"
+            "Send a caption to test the Gemini rewrite.\n\n"
+            "You will receive:\n"
+            "• Original Caption\n"
+            "• Gemini Rewrite\n"
+            "• Execution Time\n"
+            "• Input Tokens\n"
+            "• Output Tokens\n\n"
+            "Nothing will be published.\n\n"
+            "/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return AWAIT_GEMINI_SYSTEM_PROMPT  # Reuse state for text input
+
+    if data == CB_GEMINI_CLEAR_CACHE:
+        cache_size = db.get_gemini_cache_size()
+        if cache_size == 0:
+            await _safe_edit_message_text(
+                query,
+                "🧹 <b>Clear Rewrite Cache</b>\n\n"
+                "Cache is already empty.",
+                reply_markup=_gemini_keyboard(db),
+                parse_mode="HTML",
+            )
+        else:
+            deleted = db.clear_gemini_rewrite_cache()
+            await _safe_edit_message_text(
+                query,
+                f"🧹 <b>Clear Rewrite Cache</b>\n\n"
+                f"✅ Deleted {deleted} cache entries.",
+                reply_markup=_gemini_keyboard(db),
+                parse_mode="HTML",
+            )
+        return ConversationHandler.END
+
     if data == CB_DESTINATIONS:
         await _safe_edit_message_text(
             query,
@@ -1840,6 +2039,121 @@ async def receive_destination_title(
     return AWAIT_DESTINATION_CHAT_ID
 
 
+async def receive_gemini_setting(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
+
+    msg = update.message
+    text = (msg.text or "").strip()
+    db = _db(context)
+
+    # Check which setting we're editing
+    setting = context.user_data.pop("gemini_setting", None)
+
+    if setting == "test_rewrite":
+        # Test rewrite mode
+        from gemini_rewriter import rewrite_caption
+        import time
+
+        original = text
+        start_time = time.time()
+        rewritten = rewrite_caption(original, db, skip_cache=True)
+        duration_ms = int((time.time() - start_time) * 1000)
+
+        # Build response
+        response_parts = [
+            "🧪 <b>Test Rewrite Results</b>\n\n",
+            "<b>Original Caption:</b>",
+            f"<code>{original[:500]}{'...' if len(original) > 500 else ''}</code>",
+            "\n\n",
+            "<b>Rewritten Caption:</b>",
+            f"<code>{rewritten[:500]}{'...' if len(rewritten) > 500 else ''}</code>",
+            "\n\n",
+            f"⏱ Execution Time: <code>{duration_ms}ms</code>",
+        ]
+
+        await msg.reply_text(
+            "".join(response_parts),
+            parse_mode="HTML",
+            reply_markup=_gemini_keyboard(db),
+        )
+        return ConversationHandler.END
+
+    elif setting == "model":
+        # Setting model name
+        if not text:
+            await msg.reply_text("Model name cannot be empty. Try again or /cancel.")
+            return AWAIT_GEMINI_SYSTEM_PROMPT
+        db.set_gemini_model(text)
+        await msg.reply_text(
+            f"✅ Model saved: <code>{text}</code>",
+            parse_mode="HTML",
+            reply_markup=_gemini_keyboard(db),
+        )
+        return ConversationHandler.END
+
+    elif setting == "temperature":
+        # Setting temperature
+        try:
+            temp = float(text)
+            if temp < 0.0 or temp > 2.0:
+                await msg.reply_text(
+                    "❌ Temperature must be between 0.0 and 2.0.\n\n"
+                    "Try again or /cancel.",
+                )
+                return AWAIT_GEMINI_SYSTEM_PROMPT
+            db.set_gemini_temperature(temp)
+            await msg.reply_text(
+                f"✅ Temperature saved: <code>{temp}</code>",
+                parse_mode="HTML",
+                reply_markup=_gemini_keyboard(db),
+            )
+            return ConversationHandler.END
+        except ValueError:
+            await msg.reply_text(
+                "❌ Invalid number. Please send a valid temperature (0.0 to 2.0).\n\n"
+                "Try again or /cancel.",
+            )
+            return AWAIT_GEMINI_SYSTEM_PROMPT
+
+    elif setting == "max_tokens":
+        # Setting max tokens
+        try:
+            tokens = int(text)
+            if tokens < 1 or tokens > 8192:
+                await msg.reply_text(
+                    "❌ Max tokens must be between 1 and 8192.\n\n"
+                    "Try again or /cancel.",
+                )
+                return AWAIT_GEMINI_SYSTEM_PROMPT
+            db.set_gemini_max_tokens(tokens)
+            await msg.reply_text(
+                f"✅ Max tokens saved: <code>{tokens}</code>",
+                parse_mode="HTML",
+                reply_markup=_gemini_keyboard(db),
+            )
+            return ConversationHandler.END
+        except ValueError:
+            await msg.reply_text(
+                "❌ Invalid number. Please send a valid max tokens (1 to 8192).\n\n"
+                "Try again or /cancel.",
+            )
+            return AWAIT_GEMINI_SYSTEM_PROMPT
+
+    else:
+        # Default: editing system prompt
+        # Save the text as-is, preserving line breaks and UTF-8
+        db.set_gemini_system_prompt(text)
+        await msg.reply_text(
+            "✅ System prompt saved.\n\n"
+            "The prompt will be used to rewrite captions.",
+            reply_markup=_gemini_keyboard(db),
+        )
+        return ConversationHandler.END
+
+
 async def receive_destination_chat_id(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
@@ -2176,6 +2490,12 @@ def build_admin_handlers() -> list:
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND & admin_filter,
                     receive_destination_chat_id,
+                ),
+            ],
+            AWAIT_GEMINI_SYSTEM_PROMPT: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & admin_filter,
+                    receive_gemini_setting,
                 ),
             ],
             **manual_states,

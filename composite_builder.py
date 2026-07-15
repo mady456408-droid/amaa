@@ -6,7 +6,7 @@ import time
 from image_processor import CreatorsProductCard, apply_frame_creators_products
 from creators_title import resolve_frame_title
 from amazon_shortener import shorten_amazon_url
-from product_fetcher import fetch_product, resolve_display_url
+from product_fetcher import fetch_product, fetch_products, resolve_display_url
 from link_resolver import build_clean_url, extract_asin, resolve_redirect, is_standalone_asin
 from config import AMAZON_DOMAIN
 from file_cleanup import cleanup_files
@@ -66,6 +66,8 @@ async def fetch_composite_entries(
     
     Fault-tolerant: continues processing remaining URLs if individual URLs fail.
     Only returns None if no entries were successfully fetched.
+    
+    Uses bulk GetItems API for efficient fetching of multiple products.
     """
     temp_files: list[str] = []
     entries: list[dict] = []
@@ -75,6 +77,8 @@ async def fetch_composite_entries(
     urls_skipped = 0
 
     try:
+        # Phase 1: Resolve all URLs to ASINs and clean URLs
+        resolved_pairs: list[tuple[str, str]] = []
         for index, url in enumerate(urls[:_COMPOSITE_MAX_PRODUCTS], start=1):
             try:
                 resolved = await resolve_asin_from_url(url)
@@ -86,26 +90,67 @@ async def fetch_composite_entries(
                     continue
 
                 asin, clean_url = resolved
+                resolved_pairs.append((asin, clean_url))
                 urls_resolved += 1
-                scrape_key = f"{scrape_key_prefix}_{message_id}_{index}_{int(time.time())}"
-                product = await fetch_product(
-                    db,
-                    browser,
-                    asin,
-                    clean_url,
-                    scrape_key,
-                    coupon_enabled=coupon_enabled,
-                    frame_enabled=False,
+            except Exception:
+                logger.exception(
+                    "Composite entry #%d skipped — URL resolution error: %s", index, url
                 )
-                if product["title"] == "Not found":
-                    logger.warning(
-                        "Composite entry #%d skipped — title not found for asin=%s", index, asin
-                    )
-                    urls_skipped += 1
-                    if product.get("screenshot"):
-                        cleanup_files([product["screenshot"]])
-                    continue
+                urls_skipped += 1
+                continue
 
+        if not resolved_pairs:
+            logger.warning("Composite aborted — no URLs resolved")
+            return None, []
+
+        # Phase 2: Fetch all products using bulk GetItems
+        asins = [asin for asin, _ in resolved_pairs]
+        clean_urls = {asin: clean_url for asin, clean_url in resolved_pairs}
+        scrape_key = f"{scrape_key_prefix}_{message_id}_bulk_{int(time.time())}"
+
+        try:
+            products = await fetch_products(
+                db,
+                browser,
+                asins,
+                clean_urls,
+                scrape_key,
+                coupon_enabled=coupon_enabled,
+                frame_enabled=False,
+            )
+        except Exception:
+            logger.exception("Bulk product fetch failed, falling back to individual fetches")
+            # Fallback to individual fetches if bulk fails
+            products = {}
+            for asin, clean_url in resolved_pairs:
+                try:
+                    individual_scrape_key = f"{scrape_key_prefix}_{message_id}_{asin}_{int(time.time())}"
+                    product = await fetch_product(
+                        db,
+                        browser,
+                        asin,
+                        clean_url,
+                        individual_scrape_key,
+                        coupon_enabled=coupon_enabled,
+                        frame_enabled=False,
+                    )
+                    products[asin] = product
+                except Exception:
+                    logger.exception("Individual fetch failed for asin=%s", asin)
+
+        # Phase 3: Process results in original order
+        for index, (asin, clean_url) in enumerate(resolved_pairs, start=1):
+            product = products.get(asin)
+            if not product or product.get("title") == "Not found":
+                logger.warning(
+                    "Composite entry #%d skipped — product not found for asin=%s", index, asin
+                )
+                urls_skipped += 1
+                if product and product.get("screenshot"):
+                    cleanup_files([product["screenshot"]])
+                continue
+
+            try:
                 display_url = resolve_display_url(product, clean_url)
                 short_url = await shorten_amazon_url(display_url, db)
                 if short_url:
@@ -131,23 +176,13 @@ async def fetch_composite_entries(
                 )
                 urls_fetched += 1
 
-            except RuntimeError as exc:
-                if "Screenshot generation failed" in str(exc):
-                    logger.error(
-                        "Composite entry #%d skipped — screenshot generation failed: %s", index, url
-                    )
-                    urls_skipped += 1
-                    continue
-                logger.warning(
-                    "Composite entry #%d skipped — RuntimeError: %s", index, str(exc)
-                )
-                urls_skipped += 1
-                continue
             except Exception:
                 logger.exception(
-                    "Composite entry #%d skipped — unexpected error: %s", index, url
+                    "Composite entry #%d skipped — processing error for asin=%s", index, asin
                 )
                 urls_skipped += 1
+                if product.get("screenshot"):
+                    cleanup_files([product["screenshot"]])
                 continue
 
         # Log composite summary

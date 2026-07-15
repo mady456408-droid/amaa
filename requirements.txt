@@ -4,6 +4,6 @@ playwright
 httpx
 Pillow
 python-dotenv
-google-genai
+google-generativeai
 arabic-reshaper
 python-bidi

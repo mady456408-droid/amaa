@@ -44,6 +44,7 @@ from telegram_publisher import (
     SAFE_CAPTION_LENGTH,
     build_compact_product_summary,
 )
+from gemini_rewriter import rewrite_caption
 from multi_publisher import publish_to_destinations
 from upload_prep import prepare_channel_upload
 from coupon_price import coupon_apply_kwargs_from_product, normalize_caption_price_line
@@ -665,6 +666,11 @@ async def handle_publish_draft(
 
         # Determine products for overflow summary
         products = _extract_products_from_draft(draft)
+
+        # Apply Gemini AI rewrite if enabled and this is a single ASIN draft
+        # (Composite manual posts do not use Gemini)
+        if db.get_gemini_enabled() and not is_composite:
+            caption = rewrite_caption(caption, db, log_prefix="MANUAL POST")
 
         # Get enabled destinations
         destinations = db.get_enabled_destinations()
