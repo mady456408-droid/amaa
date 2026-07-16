@@ -92,10 +92,14 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
             max_output_tokens=max_tokens,
         )
 
+        t0 = time.perf_counter()
+        logger.info("%s → GEMINI API CALL START", log_prefix)
         response = model.generate_content(
             full_prompt,
             generation_config=generation_config,
         )
+        elapsed = time.perf_counter() - t0
+        logger.info("%s → GEMINI API CALL END elapsed=%.3fs", log_prefix, elapsed)
 
         # Extract rewritten caption
         rewritten = response.text.strip()
