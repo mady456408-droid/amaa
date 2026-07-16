@@ -72,23 +72,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def process_single_url(
-    application,
+async def validate_and_fetch_url(
     browser: BrowserManager,
     db: Database,
     url: str,
-    msg: Message,
+    message_id: int,
     index: int,
-    total: int,
-) -> bool:
-    """Process one URL; return True if published (not pending approval)."""
-    message_id = msg.message_id
-    source_channel_id = msg.chat_id
-    temp_files: list[str] = []
-    held_for_approval: str | None = None
-
+) -> dict | None:
+    """
+    Validate URL and fetch product data without publishing.
+    Returns product data dict if successful, None if failed.
+    """
     try:
-        logger.info("PROCESSING URL %s/%s: %s", index, total, url)
+        logger.info("VALIDATING URL %s: %s", index, url)
 
         asin = extract_asin(url)
         if asin:
@@ -100,8 +96,7 @@ async def process_single_url(
 
         if not asin:
             logger.warning("URL FAILED — no ASIN for %s", url)
-            logger.info("CONTINUING")
-            return False
+            return None
 
         logger.info("ASIN FOUND: %s", asin)
 
@@ -121,7 +116,7 @@ async def process_single_url(
         short_url = await shorten_amazon_url(display_url, db)
         if short_url:
             display_url = short_url
-        temp_files.append(product["screenshot"])
+
         logger.info(
             "SCRAPE SUCCESS: %r %r coupon=%r",
             product["title"],
@@ -130,14 +125,6 @@ async def process_single_url(
         )
 
         coupon = product.get("coupon") if coupon_enabled else None
-        logger.info(
-            "CAPTION DEBUG incoming price=%r coupon=%r list_price=%r "
-            "coupon_already_applied=%s",
-            product.get("price"),
-            coupon,
-            product.get("list_price"),
-            product.get("coupon_already_applied"),
-        )
         coupon_kwargs = (
             coupon_apply_kwargs_from_product(product) if coupon_enabled else {}
         )
@@ -159,10 +146,54 @@ async def process_single_url(
                 product=product,
             )
 
+        # Return all data needed for publishing
+        return {
+            "asin": asin,
+            "clean_url": clean_url,
+            "display_url": display_url,
+            "product": product,
+            "caption": caption,
+            "coupon": coupon,
+            "coupon_kwargs": coupon_kwargs,
+            "message_id": message_id,
+            "index": index,
+        }
+
+    except Exception:
+        logger.exception("URL VALIDATION FAILED: %s", url)
+        return None
+
+
+async def publish_validated_product(
+    application,
+    db: Database,
+    validated_data: dict,
+    msg: Message,
+    apply_gemini: bool,
+) -> bool:
+    """
+    Publish a previously validated product.
+    Returns True if published (not pending approval).
+    """
+    message_id = msg.message_id
+    source_channel_id = msg.chat_id
+    temp_files: list[str] = []
+    held_for_approval: str | None = None
+
+    try:
+        asin = validated_data["asin"]
+        clean_url = validated_data["clean_url"]
+        display_url = validated_data["display_url"]
+        product = validated_data["product"]
+        caption = validated_data["caption"]
+        coupon = validated_data["coupon"]
+        index = validated_data["index"]
+        total = 1  # Single product
+
+        logger.info("PUBLISHING VALIDATED PRODUCT %s asin=%s", index, asin)
+
         # Apply Gemini AI rewrite if enabled and this is a single ASIN source post
-        # (Composite posts and multi-product posts do not use Gemini)
-        # process_single_url is only called for single URLs, so this is guaranteed to be one product
-        if db.get_gemini_enabled():
+        if apply_gemini:
             caption = rewrite_caption(caption, db, log_prefix="SOURCE POST")
 
         upload_image = to_jpeg_for_telegram(product["screenshot"])
@@ -275,12 +306,43 @@ async def process_single_url(
         return True
 
     except Exception:
-        logger.exception("URL FAILED: %s", url)
-        logger.info("CONTINUING")
+        logger.exception("URL PUBLISH FAILED: asin=%s", validated_data.get("asin"))
         return False
     finally:
         if temp_files:
             cleanup_files(list(temp_files))
+
+
+async def process_single_url(
+    application,
+    browser: BrowserManager,
+    db: Database,
+    url: str,
+    msg: Message,
+    index: int,
+    total: int,
+    apply_gemini: bool = True,
+) -> bool:
+    """Process one URL; return True if published (not pending approval)."""
+    # Validate and fetch
+    validated = await validate_and_fetch_url(
+        browser,
+        db,
+        url,
+        msg.message_id,
+        index,
+    )
+    if not validated:
+        return False
+
+    # Publish
+    return await publish_validated_product(
+        application,
+        db,
+        validated,
+        msg,
+        apply_gemini,
+    )
 
 
 async def process_composite_urls(
@@ -423,8 +485,14 @@ async def process_message(application, msg: Message) -> None:
     # Check if composite should be used
     use_composite = FRAME_PRODUCT_IMAGES and 2 <= total <= get_composite_max_products()
 
+    # Determine if Gemini should be applied based on final published count
+    # We need to process URLs first to determine how many will actually be published
+    # For single URL mode, we can determine this after processing
+    # For composite mode, we need to check before processing
+
     if use_composite:
         logger.info("USING COMPOSITE MODE for %s URLs", total)
+        # Composite mode: always multi-product, so no Gemini
         ok = await process_composite_urls(
             application,
             browser,
@@ -443,6 +511,7 @@ async def process_message(application, msg: Message) -> None:
             url_chunks = chunk_urls_for_composite(urls)
             for chunk_index, chunk in enumerate(url_chunks, start=1):
                 if len(chunk) >= 2:
+                    # Composite chunk - no Gemini
                     ok = await process_composite_urls(
                         application,
                         browser,
@@ -453,37 +522,109 @@ async def process_message(application, msg: Message) -> None:
                         len(url_chunks),
                     )
                 else:
-                    # Single URL in chunk - use single product pipeline
-                    for url in chunk:
-                        ok = await process_single_url(
-                            application,
+                    # Single URL in chunk - use two-phase approach
+                    logger.info("CHUNK %s/%s: PHASE 1 VALIDATING %s URLs", chunk_index, len(url_chunks), len(chunk))
+                    validated_products = []
+                    for url_index, url in enumerate(chunk, start=1):
+                        validated = await validate_and_fetch_url(
                             browser,
                             db,
                             url,
-                            msg,
-                            published + 1,
-                            len(chunk),
+                            message_id,
+                            chunk_index * 100 + url_index,  # Unique index
                         )
-                if ok:
-                    published += 1
+                        if validated:
+                            validated_products.append(validated)
+
+                    resolved_count = len(validated_products)
+                    logger.info(
+                        "CHUNK %s/%s: PHASE 1 COMPLETE: original_urls=%s resolved_products=%s",
+                        chunk_index,
+                        len(url_chunks),
+                        len(chunk),
+                        resolved_count,
+                    )
+
+                    # Decide on Gemini based on actual validated count in this chunk
+                    apply_gemini = db.get_gemini_enabled() and resolved_count == 1
+                    logger.info(
+                        "CHUNK %s/%s: GEMINI CHECK: resolved_products=%s apply_gemini=%s",
+                        chunk_index,
+                        len(url_chunks),
+                        resolved_count,
+                        apply_gemini,
+                    )
+
+                    # Publish validated products
+                    logger.info("CHUNK %s/%s: PHASE 2 PUBLISHING %s validated products", chunk_index, len(url_chunks), resolved_count)
+                    for validated_index, validated in enumerate(validated_products, start=1):
+                        ok = await publish_validated_product(
+                            application,
+                            db,
+                            validated,
+                            msg,
+                            apply_gemini,
+                        )
+                        if ok:
+                            published += 1
                 if chunk_index < len(url_chunks) and PUBLISH_DELAY_SEC > 0:
                     await asyncio.sleep(PUBLISH_DELAY_SEC)
         else:
             # Single product or composite disabled - process individually
+            # Two-phase approach:
+            # Phase 1: Validate all URLs to determine which will succeed
+            # Phase 2: Count successful validations, decide on Gemini, then publish
+
+            logger.info("PHASE 1: VALIDATING %s URLs", total)
+            validated_products = []
             for index, url in enumerate(urls, start=1):
-                ok = await process_single_url(
-                    application,
+                validated = await validate_and_fetch_url(
                     browser,
                     db,
                     url,
-                    msg,
+                    message_id,
                     index,
-                    total,
+                )
+                if validated:
+                    validated_products.append(validated)
+
+            resolved_count = len(validated_products)
+            logger.info(
+                "PHASE 1 COMPLETE: original_urls=%s resolved_products=%s",
+                total,
+                resolved_count,
+            )
+
+            # Phase 2: Decide on Gemini based on actual validated count
+            apply_gemini = db.get_gemini_enabled() and resolved_count == 1
+            logger.info(
+                "SOURCE POST → GEMINI CHECK: original_urls=%s resolved_products=%s apply_gemini=%s",
+                total,
+                resolved_count,
+                apply_gemini,
+            )
+
+            # Phase 3: Publish validated products
+            logger.info("PHASE 2: PUBLISHING %s validated products", resolved_count)
+            for index, validated in enumerate(validated_products, start=1):
+                ok = await publish_validated_product(
+                    application,
+                    db,
+                    validated,
+                    msg,
+                    apply_gemini,
                 )
                 if ok:
                     published += 1
-                    if index < total and PUBLISH_DELAY_SEC > 0:
+                    if index < resolved_count and PUBLISH_DELAY_SEC > 0:
                         await asyncio.sleep(PUBLISH_DELAY_SEC)
+
+            logger.info(
+                "SOURCE POST → FINAL: original_urls=%s resolved_products=%s published_products=%s",
+                total,
+                resolved_count,
+                published,
+            )
 
     logger.info("PUBLISHED %s/%s", published, total)
     logger.info(

@@ -45,6 +45,7 @@ DRAFT_PROFILE: list[str] = [
     "images.primary.medium",
     "offersV2.listings.price",
     "offersV2.listings.dealDetails",
+    "offersV2.listings.merchantInfo",
 ]
 
 PRICE_DROP_PROFILE: list[str] = [
@@ -291,6 +292,7 @@ class NormalizedItem:
     detail_page_url: str
     list_price: str | None = None
     prime_exclusive: bool = False
+    seller_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -302,6 +304,7 @@ class NormalizedItem:
             "detail_page_url": self.detail_page_url,
             "list_price": self.list_price,
             "prime_exclusive": self.prime_exclusive,
+            "seller_name": self.seller_name,
         }
 
     @classmethod
@@ -315,6 +318,7 @@ class NormalizedItem:
             detail_page_url=str(data.get("detail_page_url") or ""),
             list_price=data.get("list_price"),
             prime_exclusive=bool(data.get("prime_exclusive")),
+            seller_name=data.get("seller_name"),
         )
 
 
@@ -543,6 +547,7 @@ def normalize_item(raw: dict[str, Any]) -> NormalizedItem | None:
     price = "Not found"
     list_price: str | None = None
     prime_exclusive = False
+    seller_name: str | None = None
     if listing:
         price_obj = listing.get("price") or {}
         price = _format_egp_price(price_obj.get("money"))
@@ -556,6 +561,10 @@ def normalize_item(raw: dict[str, Any]) -> NormalizedItem | None:
         if isinstance(deal, dict):
             access = (deal.get("accessType") or "").strip().upper()
             prime_exclusive = access == "PRIME_EXCLUSIVE"
+        # Extract seller name from merchantInfo
+        merchant_info = listing.get("merchantInfo") or {}
+        if isinstance(merchant_info, dict):
+            seller_name = (merchant_info.get("name") or "").strip() or None
 
     return NormalizedItem(
         asin=asin,
@@ -566,6 +575,7 @@ def normalize_item(raw: dict[str, Any]) -> NormalizedItem | None:
         detail_page_url=detail_page_url,
         list_price=list_price,
         prime_exclusive=prime_exclusive,
+        seller_name=seller_name,
     )
 
 

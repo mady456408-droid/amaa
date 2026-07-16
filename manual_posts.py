@@ -666,10 +666,18 @@ async def handle_publish_draft(
 
         # Determine products for overflow summary
         products = _extract_products_from_draft(draft)
+        published_product_count = len(products)
 
         # Apply Gemini AI rewrite if enabled and this is a single ASIN draft
         # (Composite manual posts do not use Gemini)
-        if db.get_gemini_enabled() and not is_composite:
+        apply_gemini = db.get_gemini_enabled() and published_product_count == 1
+        logger.info(
+            "MANUAL POST → GEMINI CHECK: draft_asins=%s published_products=%s apply_gemini=%s",
+            len(draft_asins),
+            published_product_count,
+            apply_gemini,
+        )
+        if apply_gemini:
             caption = rewrite_caption(caption, db, log_prefix="MANUAL POST")
 
         # Get enabled destinations

@@ -20,6 +20,8 @@ _LEFT_PANEL_RATIO_MIN = 0.30
 _LEFT_PANEL_RATIO_MAX = 0.32
 _OLD_PRICE_CARD_GAP = 24
 _TITLE_OLD_PRICE_GAP = 32
+_PRICE_SELLER_GAP = 14
+_SELLER_LINE_GAP = 5
 _IMG_PANEL_PAD = 16
 _IMG_FILL_RATIO = 0.966
 _TALL_ASPECT_THRESHOLD = 0.88
@@ -81,6 +83,7 @@ class CreatorsProductCard(NamedTuple):
     price: str | None = None
     list_price: str | None = None
     prime_exclusive: bool = False
+    seller_name: str | None = None
 
 
 class CompositeCardSlot(NamedTuple):
@@ -213,6 +216,7 @@ def _compute_left_panel_width(
     title: str | None,
     price: str | None,
     list_price: str | None,
+    seller_name: str | None = None,
 ) -> int:
     """Size the info panel to content, clamped to ~30–32% of slot width."""
     min_w, max_w = _left_panel_width_bounds(slot_width)
@@ -222,6 +226,7 @@ def _compute_left_panel_width(
         title=title,
         price=price,
         list_price=list_price,
+        seller_name=seller_name,
         panel_width=trial_inner,
     )
     needed = content_w + 2 * _INFO_PAD
@@ -232,6 +237,7 @@ def _compute_left_panel_width(
         title=title,
         price=price,
         list_price=list_price,
+        seller_name=seller_name,
         panel_width=final_inner,
     ) + 2 * _INFO_PAD
     return max(min_w, min(max_w, refined))
@@ -305,6 +311,7 @@ def apply_frame_creators_product(
     price: str | None = None,
     list_price: str | None = None,
     prime_exclusive: bool = False,
+    seller_name: str | None = None,
 ) -> str:
     """
     Premium Creators API product card: info panel left, product image right.
@@ -357,6 +364,7 @@ def apply_frame_creators_product(
         title=title,
         price=price,
         list_price=list_price,
+        seller_name=seller_name,
         layout_scale=layout_scale,
     )
     _draw_corner_badges(
@@ -813,6 +821,7 @@ def _measure_info_content_width(
     title: str | None,
     price: str | None,
     list_price: str | None,
+    seller_name: str | None = None,
     panel_width: int,
     scale: float = 1.0,
 ) -> int:
@@ -835,6 +844,17 @@ def _measure_info_content_width(
         )
         for line in lines:
             widths.append(_text_bbox(draw, line, title_font)[0])
+    if seller_name and seller_name.strip():
+        label_font_size = _scaled(int(_TITLE_FONT_MAX * 0.5), scale)
+        name_font_size = _scaled(int(_TITLE_FONT_MAX * 0.6), scale)
+        label_font = _load_ui_font(label_font_size, "Sold by", bold=False)
+        name_font = _load_title_font(name_font_size, title=seller_name)
+        if label_font and name_font:
+            # Measure both lines
+            label_bbox = draw.textbbox((0, 0), "Sold by", font=label_font)
+            name_bbox = draw.textbbox((0, 0), seller_name, font=name_font)
+            widths.append(label_bbox[2] - label_bbox[0])
+            widths.append(name_bbox[2] - name_bbox[0])
     return max(widths) if widths else 0
 
 
@@ -864,6 +884,7 @@ def _info_content_group_height(
     title: str | None,
     price: str | None,
     list_price: str | None,
+    seller_name: str | None = None,
     panel_width: int,
     scale: float,
 ) -> int:
@@ -871,6 +892,7 @@ def _info_content_group_height(
     has_title = bool(title and title.strip() != "Not found")
     has_old = _valid_price(list_price)
     has_current = _valid_price(price)
+    has_seller = bool(seller_name and seller_name.strip())
 
     if has_title:
         total += _title_block_height(draw, title, panel_width, scale)
@@ -885,7 +907,83 @@ def _info_content_group_height(
             total += _scaled(_TITLE_OLD_PRICE_GAP, scale)
         _, box_h = _price_card_dimensions(draw, price.strip(), panel_width, scale)
         total += box_h
+        if has_seller:
+            total += _scaled(_PRICE_SELLER_GAP, scale)
+            total += _seller_line_height(draw, seller_name.strip(), panel_width, scale)
     return total
+
+
+def _seller_line_height(
+    draw: ImageDraw.ImageDraw,
+    seller_name: str,
+    panel_width: int,
+    scale: float,
+) -> int:
+    """Calculate height of seller lines (two lines: label + name)."""
+    label_font_size = _scaled(int(_TITLE_FONT_MAX * 0.5), scale)
+    name_font_size = _scaled(int(_TITLE_FONT_MAX * 0.6), scale)
+    label_font = _load_title_font(label_font_size, title="Sold by")
+    name_font = _load_title_font(name_font_size, title=seller_name)
+    if label_font is None or name_font is None:
+        return 0
+    gap = _scaled(_SELLER_LINE_GAP, scale)
+    return label_font.size + gap + name_font.size
+
+
+def _draw_seller_line(
+    draw: ImageDraw.ImageDraw,
+    *,
+    y: int,
+    seller_name: str,
+    price_card_rect: tuple[int, int, int, int],
+    scale: float,
+) -> None:
+    """Draw seller lines below price card with two-line layout."""
+    label_font_size = _scaled(int(_TITLE_FONT_MAX * 0.5), scale)
+    name_font_size = _scaled(int(_TITLE_FONT_MAX * 0.6), scale)
+    label_font = _load_ui_font(label_font_size, "Sold by", bold=False)
+    name_font = _load_title_font(name_font_size, title=seller_name)
+    if label_font is None or name_font is None:
+        return
+
+    # Extract price card rectangle
+    card_x, card_y, card_w, card_h = price_card_rect
+    card_center_x = card_x + card_w // 2
+
+    # First line: "Sold by" - medium gray, regular weight
+    label_text = "Sold by"
+    label_color = (119, 119, 119)  # #777777
+    label_bbox = draw.textbbox((0, 0), label_text, font=label_font)
+    label_width = label_bbox[2] - label_bbox[0]
+    label_x = card_center_x - label_width // 2
+    draw.text((label_x, y), label_text, font=label_font, fill=label_color)
+
+    # Gap between lines
+    gap = _scaled(_SELLER_LINE_GAP, scale)
+
+    # Second line: seller name - dark gray, semi-bold
+    name_color = (68, 68, 68)  # #444444
+    name_bbox = draw.textbbox((0, 0), seller_name, font=name_font)
+    name_width = name_bbox[2] - name_bbox[0]
+
+    # Truncate seller name if too long
+    max_text_width = card_w
+    if name_width > max_text_width:
+        low, high = 0, len(seller_name)
+        while low < high:
+            mid = (low + high) // 2
+            truncated = f"{seller_name[:mid]}..."
+            bbox = draw.textbbox((0, 0), truncated, font=name_font)
+            if bbox[2] - bbox[0] <= max_text_width:
+                low = mid + 1
+            else:
+                high = mid
+        seller_name = seller_name[:max(0, low - 1)]
+        name_bbox = draw.textbbox((0, 0), seller_name, font=name_font)
+        name_width = name_bbox[2] - name_bbox[0]
+
+    name_x = card_center_x - name_width // 2
+    draw.text((name_x, y + label_font.size + gap), seller_name, font=name_font, fill=name_color)
 
 
 def _resolve_title_layout(
@@ -1223,7 +1321,7 @@ def draw_price_card(
         _BLACK_TEXT,
     )
 
-    return box_y2
+    return (box_y2, (box_x1, box_y1, layout.box_w, layout.box_h))
 
 
 def draw_discount_badge(
@@ -1316,6 +1414,7 @@ def _draw_info_panel(
     title: str | None,
     price: str | None,
     list_price: str | None,
+    seller_name: str | None = None,
     layout_scale: float,
 ) -> None:
     draw = ImageDraw.Draw(canvas)
@@ -1327,6 +1426,7 @@ def _draw_info_panel(
         title=title,
         price=price,
         list_price=list_price,
+        seller_name=seller_name,
         panel_width=panel_width,
         scale=layout_scale,
     )
@@ -1339,6 +1439,7 @@ def _draw_info_panel(
     has_title = bool(title and title.strip() != "Not found")
     has_old = _valid_price(list_price)
     has_current = _valid_price(price)
+    has_seller = bool(seller_name and seller_name.strip())
 
     if has_title:
         cursor_y = draw_title(
@@ -1369,13 +1470,25 @@ def _draw_info_panel(
             cursor_y += _scaled(_OLD_PRICE_CARD_GAP, layout_scale)
         elif has_title:
             cursor_y += _scaled(_TITLE_OLD_PRICE_GAP, layout_scale)
-        draw_price_card(
+        price_card_y = cursor_y
+        cursor_y, price_card_rect = draw_price_card(
             draw,
             y=cursor_y,
             price=price.strip(),
             panel_x=panel_x,
             panel_width=panel_width,
             rtl=True,
+            scale=layout_scale,
+        )
+
+    # Draw seller name below price card (outside the price card)
+    if has_seller and has_current:
+        cursor_y += _scaled(_PRICE_SELLER_GAP, layout_scale)
+        _draw_seller_line(
+            draw,
+            y=cursor_y,
+            seller_name=seller_name.strip(),
+            price_card_rect=price_card_rect,
             scale=layout_scale,
         )
 
@@ -1831,6 +1944,7 @@ def apply_frame_creators_products(
             price=product.price,
             list_price=product.list_price,
             prime_exclusive=product.prime_exclusive,
+            seller_name=product.seller_name,
         )
 
     return _apply_frame_creators_composite(output_path, products)

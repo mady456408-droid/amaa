@@ -71,6 +71,7 @@ def _maybe_apply_creators_frame(
     price: str | None = None,
     list_price: str | None = None,
     prime_exclusive: bool = False,
+    seller_name: str | None = None,
 ) -> str | None:
     """Apply Creators API framing (large FIT + badges) when enabled."""
     if not frame_enabled:
@@ -85,6 +86,7 @@ def _maybe_apply_creators_frame(
             price=price,
             list_price=list_price,
             prime_exclusive=prime_exclusive,
+            seller_name=seller_name,
         )
     logger.warning(
         "FRAME SKIPPED — image missing path=%s asin=%s",
@@ -198,6 +200,7 @@ async def _resolve_product_image(
     list_price: str | None = None,
     prime_exclusive: bool = False,
     title: str | None = None,
+    seller_name: str | None = None,
     db=None,
 ) -> str:
     """Return local image path for publish (framed or raw)."""
@@ -218,6 +221,7 @@ async def _resolve_product_image(
                     price=price,
                     list_price=list_price,
                     prime_exclusive=prime_exclusive,
+                    seller_name=seller_name,
                 )
                 return _require_screenshot(framed, asin=asin)
             return base_path
@@ -554,6 +558,7 @@ async def fetch_product(
                     "image_url": item.image_url,
                     "detail_page_url": item.detail_page_url,
                     "features": item.features,
+                    "seller_name": item.seller_name,
                     "coupon": None,
                     "coupon_already_applied": False,
                     "data_source": "creators",
@@ -586,17 +591,19 @@ async def fetch_product(
                     price=item.price,
                     list_price=item.list_price,
                     prime_exclusive=item.prime_exclusive,
+                    seller_name=item.seller_name,
                     db=db,
                 )
 
                 logger.info(
                     "SCRAPER DEBUG title=%r price=%r list_price=%r coupon=%r "
-                    "coupon_already_applied=%s source=creators",
+                    "coupon_already_applied=%s seller_name=%r source=creators",
                     product["title"],
                     product["price"],
                     product.get("list_price"),
                     product.get("coupon"),
                     product.get("coupon_already_applied"),
+                    product.get("seller_name"),
                 )
                 return product
         except RuntimeError:
