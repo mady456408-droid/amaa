@@ -564,25 +564,24 @@ class Database:
             ).fetchall()
         return {str(r["asin"]).upper() for r in rows}
 
-    def is_asin_in_last_published(self, asin: str, limit: int = 10) -> bool:
-        return asin.upper() in self.get_last_published_asins(limit)
+    def is_asin_in_last_published(self, asin: str, limit: int = 10, source: str = "unknown") -> bool:
+        """
+        Check if ASIN exists in the last N published ASINs (count-based, not time-based).
 
-    def is_asin_in_last_published_for_destination(
-        self, asin: str, destination_id: int, limit: int = 10
-    ) -> bool:
-        """Check if ASIN was recently published to a specific destination."""
-        asin = asin.upper()
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=limit)
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT 1 FROM published_products
-                WHERE asin = ? AND destination_id = ? AND published_at > ?
-                LIMIT 1
-                """,
-                (asin, destination_id, cutoff.isoformat()),
-            ).fetchone()
-        return row is not None
+        This is the single source of truth for duplicate detection.
+        Business rule: Check whether ASIN exists within the last 10 published ASINs.
+        """
+        asin_upper = asin.upper()
+        found = asin_upper in self.get_last_published_asins(limit)
+        logger.info(
+            "DUPLICATE CHECK asin=%s source=%s found_in_last_%d=%s action=%s",
+            asin_upper,
+            source,
+            limit,
+            found,
+            "approval" if found else "publish",
+        )
+        return found
 
     def add_published_product(
         self,

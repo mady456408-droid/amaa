@@ -201,15 +201,9 @@ async def publish_validated_product(
             temp_files.append(upload_image)
         framed_image = product["screenshot"]
 
-        # Check duplicates per destination
-        destinations = db.get_enabled_destinations()
-        duplicate_destinations = []
-        for dest in destinations:
-            if db.is_asin_in_last_published_for_destination(asin, dest["id"], LAST_PUBLISHED_LOOKBACK):
-                duplicate_destinations.append(dest["title"])
-
-        if duplicate_destinations:
-            logger.info("DUPLICATE ASIN DETECTED: %s in destinations: %s", asin, ", ".join(duplicate_destinations))
+        # Check if ASIN is in last 10 published globally
+        if db.is_asin_in_last_published(asin, LAST_PUBLISHED_LOOKBACK, source="single"):
+            logger.info("DUPLICATE ASIN DETECTED: %s in last %d published", asin, LAST_PUBLISHED_LOOKBACK)
             held_for_approval = framed_image
             if held_for_approval in temp_files:
                 temp_files.remove(held_for_approval)
@@ -382,6 +376,53 @@ async def process_composite_urls(
         temp_files.append(composite_path)
 
         caption = await build_composite_caption(db, entries, coupon_enabled)
+
+        # Check for duplicate ASINs in last published
+        # COMPOSITE BEHAVIOR: If ANY ASIN in the composite is a duplicate,
+        # the entire composite requires approval. This is necessary because:
+        # 1. Composite is a single visual unit (one image with all products)
+        # 2. Cannot split the composite - would require re-rendering
+        # 3. Admin needs full context of what's being published together
+        composite_asins = [entry["asin"].upper() for entry in entries]
+        duplicate_asins = []
+        for asin in composite_asins:
+            if db.is_asin_in_last_published(asin, LAST_PUBLISHED_LOOKBACK, source="composite"):
+                duplicate_asins.append(asin)
+
+        if duplicate_asins:
+            logger.info(
+                "COMPOSITE DUPLICATE ASIN DETECTED: %s in last %d published - ENTIRE COMPOSITE requires approval",
+                ", ".join(duplicate_asins),
+                LAST_PUBLISHED_LOOKBACK,
+            )
+            # Route to approval workflow for the first duplicate ASIN
+            # The entire composite image is sent for admin review
+            duplicate_entry = next(e for e in entries if e["asin"].upper() in duplicate_asins)
+            pending_id = db.create_pending_approval(
+                asin=duplicate_entry["asin"],
+                title=duplicate_entry["title"],
+                price=duplicate_entry["product"]["price"],
+                clean_url=duplicate_entry["clean_url"],
+                source_channel_id=source_channel_id,
+                caption=caption,
+                image_path=composite_path,
+                coupon=duplicate_entry["product"].get("coupon") if coupon_enabled else None,
+                list_price=duplicate_entry["product"].get("list_price"),
+            )
+            await send_approval_request(
+                application.bot,
+                db,
+                pending_id,
+                duplicate_entry["asin"],
+                duplicate_entry["title"],
+                source_channel_id,
+                composite_path,
+                price=duplicate_entry["product"]["price"],
+                coupon=duplicate_entry["product"].get("coupon") if coupon_enabled else None,
+                list_price=duplicate_entry["product"].get("list_price"),
+            )
+            cleanup_files(temp_files)
+            return False
 
         upload_image = to_jpeg_for_telegram(composite_path)
         if upload_image != composite_path:

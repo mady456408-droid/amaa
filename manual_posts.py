@@ -10,13 +10,13 @@ from telegram.ext import (
     filters,
 )
 
-from config import ADMIN_USER_IDS, FRAME_PRODUCT_IMAGES
+from config import ADMIN_USER_IDS, FRAME_PRODUCT_IMAGES, LAST_PUBLISHED_LOOKBACK, AMAZON_DOMAIN
 from conversation_states import AWAIT_DRAFT_CAPTION
 from amazon_scraper import BrowserManager
 from amazon_shortener import shorten_amazon_url
 from product_fetcher import fetch_product, resolve_display_url
-from config import AMAZON_DOMAIN, LAST_PUBLISHED_LOOKBACK
 from database import Database
+from duplicate_moderation import send_approval_request
 from file_cleanup import cleanup_files
 from link_resolver import (
     build_clean_url,
@@ -630,6 +630,49 @@ async def handle_publish_draft(
         caption = draft["caption"]
         draft_asins = _draft_asins(draft)
         is_composite = len(draft_asins) > 1
+
+        # Check for duplicate ASINs in last published
+        duplicate_asins = []
+        for asin in draft_asins:
+            if db.is_asin_in_last_published(asin, LAST_PUBLISHED_LOOKBACK, source="manual"):
+                duplicate_asins.append(asin)
+
+        if duplicate_asins:
+            logger.info(
+                "MANUAL POST DUPLICATE ASIN DETECTED: %s in last %d published",
+                ", ".join(duplicate_asins),
+                LAST_PUBLISHED_LOOKBACK,
+            )
+            # Route to approval workflow for the first duplicate ASIN
+            pending_id = db.create_pending_approval(
+                asin=duplicate_asins[0],
+                title=draft["title"],
+                price=draft.get("price", ""),
+                clean_url=draft.get("clean_url", ""),
+                source_channel_id=draft["created_by"],
+                caption=caption,
+                image_path=draft["image_path"],
+                coupon=draft.get("coupon"),
+                list_price=draft.get("list_price"),
+            )
+            await send_approval_request(
+                context.application.bot,
+                db,
+                pending_id,
+                duplicate_asins[0],
+                draft["title"],
+                draft["created_by"],
+                draft["image_path"],
+                price=draft.get("price", ""),
+                coupon=draft.get("coupon"),
+                list_price=draft.get("list_price"),
+            )
+            await query.edit_message_caption(
+                f"⚠️ Duplicate ASIN detected: <code>{duplicate_asins[0]}</code>. Sent for approval.",
+                parse_mode="HTML",
+            )
+            return
+
         if (
             not is_composite
             and draft.get("price")
