@@ -194,6 +194,7 @@ async def publish_validated_product(
 
         # Apply Gemini AI rewrite if enabled and this is a single ASIN source post
         if apply_gemini:
+            logger.info("SOURCE POST → CALLING GEMINI REWRITE FUNCTION")
             caption = rewrite_caption(caption, db, log_prefix="SOURCE POST")
 
         upload_image = to_jpeg_for_telegram(product["screenshot"])
@@ -588,12 +589,19 @@ async def process_message(application, msg: Message) -> None:
 
                     # Decide on Gemini based on actual validated count in this chunk
                     apply_gemini = db.get_gemini_enabled() and resolved_count == 1
+                    reason = "single validated product" if resolved_count == 1 else f"{resolved_count} validated products"
                     logger.info(
-                        "CHUNK %s/%s: GEMINI CHECK: resolved_products=%s apply_gemini=%s",
+                        "CHUNK %s/%s: GEMINI DECISION\n"
+                        "  original_urls=%s\n"
+                        "  validated_products=%s\n"
+                        "  should_rewrite=%s\n"
+                        "  reason=%s",
                         chunk_index,
                         len(url_chunks),
+                        len(chunk),
                         resolved_count,
                         apply_gemini,
+                        reason,
                     )
 
                     # Publish validated products
@@ -638,11 +646,17 @@ async def process_message(application, msg: Message) -> None:
 
             # Phase 2: Decide on Gemini based on actual validated count
             apply_gemini = db.get_gemini_enabled() and resolved_count == 1
+            reason = "single validated product" if resolved_count == 1 else f"{resolved_count} validated products"
             logger.info(
-                "SOURCE POST → GEMINI CHECK: original_urls=%s resolved_products=%s apply_gemini=%s",
+                "SOURCE POST → GEMINI DECISION\n"
+                "  original_urls=%s\n"
+                "  validated_products=%s\n"
+                "  should_rewrite=%s\n"
+                "  reason=%s",
                 total,
                 resolved_count,
                 apply_gemini,
+                reason,
             )
 
             # Phase 3: Publish validated products

@@ -114,6 +114,8 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
     Returns:
         Rewritten caption, or original caption if Gemini is disabled or all keys fail
     """
+    logger.info(f"{log_prefix} → ENTERING GEMINI REWRITE")
+    
     # Check if Gemini is enabled
     if not db.get_gemini_enabled():
         logger.info(f"{log_prefix} → AI REWRITE SKIPPED: Gemini disabled")
@@ -125,7 +127,7 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
         if cached:
             logger.info(f"{log_prefix} → CACHE HIT: returning cached rewrite")
             return cached
-        logger.info(f"{log_prefix} → CACHE MISS: calling Gemini")
+        logger.info(f"{log_prefix} → CACHE MISS: proceeding to Gemini API")
 
     # Read settings from database
     model_name = db.get_gemini_model()
@@ -142,6 +144,7 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
 
     start_time = time.time()
     key_pool = get_key_pool()
+    logger.info(f"{log_prefix} → ACQUIRING GEMINI KEY POOL")
 
     # Try each available key
     keys_attempted = []
@@ -155,6 +158,7 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
             break
 
         keys_attempted.append(key.index)
+        logger.info(f"{log_prefix} → ATTEMPTING REQUEST WITH KEY #{key.index}")
 
         try:
             # Attempt the request
@@ -224,6 +228,7 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
                     f"{log_prefix} → =================================================="
                 )
                 key_pool.report_failure(key, f"Validation failed: {validation_fail_reason}")
+                logger.info(f"{log_prefix} → AI REWRITE FAILED: validation={validation_fail_reason}")
                 return caption
 
             # Report success
