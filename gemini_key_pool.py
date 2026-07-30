@@ -13,9 +13,17 @@ import os
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional
+from enum import Enum
+from typing import Optional, Set
 
 logger = logging.getLogger(__name__)
+
+
+class KeyStatus(Enum):
+    """Status of a Gemini API key."""
+    ACTIVE = "ACTIVE"
+    COOLDOWN = "COOLDOWN"
+    DISABLED = "DISABLED"
 
 
 @dataclass
@@ -24,6 +32,7 @@ class GeminiKey:
     
     api_key: str
     index: int
+    status: KeyStatus = KeyStatus.ACTIVE
     cooldown_until: Optional[datetime] = None
     last_error: Optional[str] = None
     total_requests: int = 0
@@ -32,7 +41,9 @@ class GeminiKey:
     
     @property
     def is_healthy(self) -> bool:
-        """Check if key is healthy (not in cooldown)."""
+        """Check if key is healthy (ACTIVE and not in cooldown)."""
+        if self.status != KeyStatus.ACTIVE:
+            return False
         if self.cooldown_until is None:
             return True
         return datetime.now() >= self.cooldown_until
@@ -102,21 +113,51 @@ class GeminiKeyPool:
         
         self._keys = keys
     
-    def get_next_key(self) -> Optional[GeminiKey]:
+    def get_next_key(self, attempted_keys: Optional[Set[int]] = None) -> Optional[GeminiKey]:
         """
         Get the next healthy key from the pool.
         
-        Returns the first healthy key (not in cooldown).
-        Returns None if no healthy keys are available.
+        Args:
+            attempted_keys: Set of key indices already attempted in this rewrite operation
+        
+        Returns the first key that satisfies:
+        - Status is ACTIVE
+        - Not in cooldown
+        - Not already attempted
+        
+        Returns None if no suitable keys are available.
         """
+        if attempted_keys is None:
+            attempted_keys = set()
+        
         with self._pool_lock:
             for key in self._keys:
-                if key.is_healthy:
-                    key.total_requests += 1
-                    logger.info(f"GEMINI KEY #{key.index} SELECTED")
-                    return key
+                # Skip disabled keys
+                if key.status == KeyStatus.DISABLED:
+                    logger.info(f"Skipping key #{key.index} (DISABLED)")
+                    continue
+                
+                # Skip keys in cooldown
+                if key.status == KeyStatus.COOLDOWN:
+                    if not key.is_healthy:
+                        logger.info(f"Skipping key #{key.index} (COOLDOWN)")
+                        continue
+                    else:
+                        # Cooldown expired, reset to ACTIVE
+                        key.status = KeyStatus.ACTIVE
+                        logger.info(f"Key #{key.index} cooldown expired, status reset to ACTIVE")
+                
+                # Skip already attempted keys
+                if key.index in attempted_keys:
+                    logger.info(f"Skipping key #{key.index} (ALREADY ATTEMPTED)")
+                    continue
+                
+                # Key is available
+                key.total_requests += 1
+                logger.info(f"GEMINI KEY #{key.index} SELECTED")
+                return key
             
-            logger.warning("ALL GEMINI KEYS ARE IN COOLDOWN")
+            logger.warning("ALL GEMINI KEYS UNAVAILABLE")
             return None
     
     def report_success(self, key: GeminiKey) -> None:
@@ -153,8 +194,22 @@ class GeminiKeyPool:
             seconds: Cooldown duration in seconds
         """
         with self._pool_lock:
+            key.status = KeyStatus.COOLDOWN
             key.cooldown_until = datetime.now() + timedelta(seconds=seconds)
             logger.info(f"GEMINI KEY #{key.index} COOLDOWN {seconds}s")
+    
+    def disable_key(self, key: GeminiKey, reason: str) -> None:
+        """
+        Permanently disable a key until application restart.
+        
+        Args:
+            key: The GeminiKey to disable
+            reason: Reason for disabling the key
+        """
+        with self._pool_lock:
+            key.status = KeyStatus.DISABLED
+            key.last_error = reason
+            logger.info(f"GEMINI KEY #{key.index} DISABLED\nReason: {reason}")
     
     def get_retry_delay_from_error(self, error: Exception) -> Optional[float]:
         """
@@ -199,6 +254,7 @@ class GeminiKeyPool:
             for key in self._keys:
                 stats["keys"].append({
                     "index": key.index,
+                    "status": key.status.value,
                     "is_healthy": key.is_healthy,
                     "cooldown_remaining_seconds": key.cooldown_remaining_seconds,
                     "total_requests": key.total_requests,

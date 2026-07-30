@@ -225,6 +225,10 @@ async def prepare_composite_draft_from_inputs(
         message_id=message_id,
     )
     if not entries:
+        logger.warning(
+            "MANUAL COMPOSITE CANCELLED\n"
+            "  reason=no valid products"
+        )
         return None
 
     composite_key = (

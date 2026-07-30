@@ -72,6 +72,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _valid_price(text: str | None) -> bool:
+    """Check if price is valid (not None, not empty, not 'Not found')."""
+    return bool(text) and text.strip() != "Not found"
+
+
 async def validate_and_fetch_url(
     browser: BrowserManager,
     db: Database,
@@ -111,6 +116,19 @@ async def validate_and_fetch_url(
             scrape_asin,
             coupon_enabled=coupon_enabled,
         )
+        
+        # Validate price before proceeding
+        if not _valid_price(product["price"]):
+            logger.warning(
+                "PRODUCT SKIPPED\n"
+                "  reason=price_not_found\n"
+                "  asin=%s\n"
+                "  raw_price=%r",
+                asin,
+                product["price"],
+            )
+            return None
+        
         display_url = resolve_display_url(product, clean_url)
         # Try to shorten the URL using Amazon SiteStripe
         short_url = await shorten_amazon_url(display_url, db)

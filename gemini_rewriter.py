@@ -147,16 +147,18 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
     logger.info(f"{log_prefix} → ACQUIRING GEMINI KEY POOL")
 
     # Try each available key
+    attempted_keys = set()
     keys_attempted = []
     last_error = None
 
     while True:
-        # Get next healthy key
-        key = key_pool.get_next_key()
+        # Get next healthy key (passing attempted_keys to avoid retries)
+        key = key_pool.get_next_key(attempted_keys)
         if key is None:
             logger.error(f"{log_prefix} → ALL GEMINI KEYS UNAVAILABLE")
             break
 
+        attempted_keys.add(key.index)
         keys_attempted.append(key.index)
         logger.info(f"{log_prefix} → ATTEMPTING REQUEST WITH KEY #{key.index}")
 
@@ -263,10 +265,19 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
             error_str = str(e).lower()
             duration_ms = int((time.time() - start_time) * 1000)
             
-            # Check if this is a 429 rate limit error
-            is_429 = "429" in error_str or "quota" in error_str or "rate limit" in error_str
+            # Check if this is a 403 permission denied error
+            is_403 = "403" in error_str or "permission denied" in error_str or "project has been denied access" in error_str
             
-            if is_429:
+            if is_403:
+                # Permanently disable this key
+                key_pool.disable_key(key, f"403 Project Denied: {str(e)}")
+                logger.warning(
+                    f"{log_prefix} → GEMINI KEY #{key.index} DISABLED (403). "
+                    f"Switching to next key."
+                )
+                continue
+            elif "429" in error_str or "quota" in error_str or "rate limit" in error_str:
+                # Check if this is a 429 rate limit error
                 # Extract retry delay if available
                 retry_delay = key_pool.get_retry_delay_from_error(e)
                 if retry_delay is None:
