@@ -1,0 +1,36 @@
+{
+  "device_id": "64208531-fff3-42b1-8472-a57ec84b7b4d",
+  "play_integrity_token": null,
+  "conduit_token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb25kdWl0X3V1aWQiOiJkMzZmN2ZhN2NlZmE0NzI3YThiMGRjMjVlNTBkNzRhOSIsImNvbmR1aXRfbG9jYXRpb24iOiIxMC4xMzMuMTI2LjkwOjgzMDYiLCJjbHVzdGVyIjoidW5pZmllZC0xNzMiLCJpYXQiOjE3ODU1MjI3NjUsImV4cCI6MTc4NTUyMjgyNSwidHVybl90b3BpY19pZCI6bnVsbH0.-rJHUoQmv_qFXi76d0-RVyUXXkWOtfS5gzmuRrNf3GyEVbMeFP3rM5369j18GXOW1J68tPgp6O9HOHGeHD9yJg",
+  "payload_config": {
+    "model": "auto",
+    "history_and_training_disabled": false,
+    "enable_message_followups": true,
+    "force_use_sse": true,
+    "force_use_search": null,
+    "force_paragen": false,
+    "supports_buffering": false,
+    "timezone": "Africa/Cairo",
+    "timezone_offset_min": -180,
+    "system_hints": [],
+    "is_onboarding_conversation": false,
+    "no_auth_ad_preferences": {
+      "personalization_enabled": false,
+      "history_enabled": true
+    },
+    "client_prepare_dispatch": "debounced",
+    "client_prepare_source": "composer_editor_state",
+    "client_prepare_state": "success"
+  },
+  "base_url": "https://android.chat.openai.com",
+  "prepare_path": "/backend-anon/f/conversation/prepare",
+  "sentinel_path": "/backend-anon/sentinel/chat-requirements",
+  "conversation_path": "/backend-anon/f/conversation",
+  "user_agent": "ChatGPT/1.2026.195 (Android 15; RMX3834; build 2619512)",
+  "device_tier": "lower_mid",
+  "account_id": "default",
+  "residency_region": "no_constraint",
+  "accept_language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
+  "timezone": "Africa/Cairo",
+  "timezone_offset": -180
+}

@@ -114,12 +114,8 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
     Returns:
         Rewritten caption, or original caption if Gemini is disabled or all keys fail
     """
+    logger.info(f"{log_prefix} → ENTERED gemini_rewriter.rewrite_caption")
     logger.info(f"{log_prefix} → ENTERING GEMINI REWRITE")
-    
-    # Check if Gemini is enabled
-    if not db.get_gemini_enabled():
-        logger.info(f"{log_prefix} → AI REWRITE SKIPPED: Gemini disabled")
-        return caption
 
     # Check cache first (unless skip_cache is True)
     if not skip_cache:
@@ -136,7 +132,7 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
     max_tokens = db.get_gemini_max_tokens()
 
     logger.info(
-        f"{log_prefix} → AI REWRITE START: model=%s temperature=%s max_tokens=%s",
+        f"{log_prefix} → GEMINI REWRITE START: model=%s temperature=%s max_tokens=%s",
         model_name,
         temperature,
         max_tokens,
@@ -219,7 +215,7 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
 
             if validation_fail_reason:
                 logger.warning(
-                    f"{log_prefix} → AI REWRITE VALIDATION FAILED: {validation_fail_reason}. "
+                    f"{log_prefix} → GEMINI VALIDATION FAILED: {validation_fail_reason}. "
                     f"Falling back to original caption."
                 )
                 logger.info(
@@ -230,7 +226,7 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
                     f"{log_prefix} → =================================================="
                 )
                 key_pool.report_failure(key, f"Validation failed: {validation_fail_reason}")
-                logger.info(f"{log_prefix} → AI REWRITE FAILED: validation={validation_fail_reason}")
+                logger.info(f"{log_prefix} → GEMINI FAILED: validation={validation_fail_reason}")
                 return caption
 
             # Report success
@@ -238,7 +234,7 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
 
             # Log success
             logger.info(
-                f"{log_prefix} → AI REWRITE SUCCESS: model=%s duration_ms=%s tokens_in=%s tokens_out=%s",
+                f"{log_prefix} → GEMINI SUCCESS: model=%s duration_ms=%s tokens_in=%s tokens_out=%s",
                 model_name,
                 duration_ms,
                 metadata['tokens_in'],
@@ -264,10 +260,10 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
             last_error = e
             error_str = str(e).lower()
             duration_ms = int((time.time() - start_time) * 1000)
-            
+
             # Check if this is a 403 permission denied error
             is_403 = "403" in error_str or "permission denied" in error_str or "project has been denied access" in error_str
-            
+
             if is_403:
                 # Permanently disable this key
                 key_pool.disable_key(key, f"403 Project Denied: {str(e)}")
@@ -282,7 +278,7 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
                 retry_delay = key_pool.get_retry_delay_from_error(e)
                 if retry_delay is None:
                     retry_delay = 60.0  # Default 60 seconds
-                
+
                 key_pool.put_on_cooldown(key, retry_delay)
                 logger.warning(
                     f"{log_prefix} → GEMINI KEY #{key.index} RATE LIMITED (429). "

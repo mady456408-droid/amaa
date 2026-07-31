@@ -26,6 +26,10 @@ SETTING_GEMINI_MODEL = "gemini_model"
 SETTING_GEMINI_SYSTEM_PROMPT = "gemini_system_prompt"
 SETTING_GEMINI_TEMPERATURE = "gemini_temperature"
 SETTING_GEMINI_MAX_TOKENS = "gemini_max_tokens"
+SETTING_AI_PROVIDER = "ai_provider"
+SETTING_CHATGPT_REWRITE_ENABLED = "chatgpt_rewrite_enabled"
+SETTING_CHATGPT_SKIP_CACHE = "chatgpt_skip_cache"
+SETTING_CHATGPT_REWRITE_PROMPT = "chatgpt_rewrite_prompt"
 
 
 class Database:
@@ -244,13 +248,46 @@ class Database:
                 """
                 CREATE TABLE IF NOT EXISTS gemini_rewrite_cache (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    caption_hash TEXT NOT NULL UNIQUE,
+                    caption_hash TEXT NOT NULL,
                     original_caption TEXT NOT NULL,
                     rewritten_caption TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    provider TEXT NOT NULL DEFAULT 'gemini',
+                    UNIQUE(caption_hash, provider)
                 )
                 """
             )
+
+            # Migration: Add provider column to existing gemini_rewrite_cache
+            cache_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(gemini_rewrite_cache)").fetchall()
+            }
+            if "provider" not in cache_cols:
+                # Drop old unique constraint and add new one with provider
+                conn.execute("ALTER TABLE gemini_rewrite_cache ADD COLUMN provider TEXT NOT NULL DEFAULT 'gemini'")
+                # Recreate table with proper unique constraint
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS gemini_rewrite_cache_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        caption_hash TEXT NOT NULL,
+                        original_caption TEXT NOT NULL,
+                        rewritten_caption TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        provider TEXT NOT NULL DEFAULT 'gemini',
+                        UNIQUE(caption_hash, provider)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO gemini_rewrite_cache_new (id, caption_hash, original_caption, rewritten_caption, created_at, provider)
+                    SELECT id, caption_hash, original_caption, rewritten_caption, created_at, 'gemini' FROM gemini_rewrite_cache
+                    """
+                )
+                conn.execute("DROP TABLE gemini_rewrite_cache")
+                conn.execute("ALTER TABLE gemini_rewrite_cache_new RENAME TO gemini_rewrite_cache")
             conn.commit()
 
     def seed_from_env(self, source_channel_id: int, destination_channel_id: int) -> None:
@@ -505,46 +542,104 @@ class Database:
         clamped = max(1, min(8192, max_tokens))
         self.set_setting(SETTING_GEMINI_MAX_TOKENS, str(clamped))
 
-    # --- Gemini Rewrite Cache ---
+    # --- AI Provider Settings ---
+
+    def get_ai_provider(self) -> str:
+        """Get the selected AI provider ('gemini' or 'chatgpt')."""
+        return self.get_setting(SETTING_AI_PROVIDER) or "gemini"
+
+    def set_ai_provider(self, provider: str) -> None:
+        """Set the AI provider ('gemini' or 'chatgpt')."""
+        if provider not in ("gemini", "chatgpt"):
+            raise ValueError(f"Invalid provider: {provider}. Must be 'gemini' or 'chatgpt'")
+        self.set_setting(SETTING_AI_PROVIDER, provider)
+
+    # --- ChatGPT Rewrite Settings ---
+
+    def get_chatgpt_rewrite_enabled(self) -> bool:
+        """Get whether ChatGPT rewrite is enabled."""
+        return self.get_setting(SETTING_CHATGPT_REWRITE_ENABLED) == "1"
+
+    def set_chatgpt_rewrite_enabled(self, enabled: bool) -> None:
+        """Set whether ChatGPT rewrite is enabled."""
+        self.set_setting(SETTING_CHATGPT_REWRITE_ENABLED, "1" if enabled else "0")
+
+    def get_chatgpt_skip_cache(self) -> bool:
+        """Get whether ChatGPT rewrite should skip cache."""
+        return self.get_setting(SETTING_CHATGPT_SKIP_CACHE) == "1"
+
+    def set_chatgpt_skip_cache(self, skip: bool) -> None:
+        """Set whether ChatGPT rewrite should skip cache."""
+        self.set_setting(SETTING_CHATGPT_SKIP_CACHE, "1" if skip else "0")
+
+    def get_chatgpt_rewrite_prompt(self) -> str:
+        """Get the ChatGPT rewrite system prompt."""
+        return self.get_setting(SETTING_CHATGPT_REWRITE_PROMPT) or ""
+
+    def set_chatgpt_rewrite_prompt(self, prompt: str) -> None:
+        """Set the ChatGPT rewrite system prompt."""
+        self.set_setting(SETTING_CHATGPT_REWRITE_PROMPT, prompt)
+
+    # --- AI Rewrite Cache (provider-aware) ---
 
     def _hash_caption(self, caption: str) -> str:
         """Generate SHA256 hash of caption for cache key."""
         return hashlib.sha256(caption.encode("utf-8")).hexdigest()
 
-    def get_gemini_rewrite_cache(self, caption: str) -> str | None:
-        """Get cached rewritten caption if exists."""
+    def get_ai_rewrite_cache(self, caption: str, provider: str) -> str | None:
+        """Get cached rewritten caption if exists for the specified provider."""
         caption_hash = self._hash_caption(caption)
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT rewritten_caption FROM gemini_rewrite_cache WHERE caption_hash = ?",
-                (caption_hash,),
+                "SELECT rewritten_caption FROM gemini_rewrite_cache WHERE caption_hash = ? AND provider = ?",
+                (caption_hash, provider),
             ).fetchone()
         return row["rewritten_caption"] if row else None
 
-    def set_gemini_rewrite_cache(self, original_caption: str, rewritten_caption: str) -> None:
-        """Cache a rewritten caption."""
+    def set_ai_rewrite_cache(self, original_caption: str, rewritten_caption: str, provider: str) -> None:
+        """Cache a rewritten caption for the specified provider."""
         caption_hash = self._hash_caption(original_caption)
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO gemini_rewrite_cache (caption_hash, original_caption, rewritten_caption, created_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(caption_hash) DO UPDATE SET
+                INSERT INTO gemini_rewrite_cache (caption_hash, original_caption, rewritten_caption, created_at, provider)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(caption_hash, provider) DO UPDATE SET
                     original_caption = excluded.original_caption,
                     rewritten_caption = excluded.rewritten_caption,
                     created_at = excluded.created_at
                 """,
-                (caption_hash, original_caption, rewritten_caption, now),
+                (caption_hash, original_caption, rewritten_caption, now, provider),
             )
             conn.commit()
+
+    def get_gemini_rewrite_cache(self, caption: str) -> str | None:
+        """Get cached rewritten caption if exists (legacy method for backward compatibility)."""
+        return self.get_ai_rewrite_cache(caption, "gemini")
+
+    def set_gemini_rewrite_cache(self, original_caption: str, rewritten_caption: str) -> None:
+        """Cache a rewritten caption (legacy method for backward compatibility)."""
+        self.set_ai_rewrite_cache(original_caption, rewritten_caption, "gemini")
 
     def clear_gemini_rewrite_cache(self) -> int:
         """Clear all gemini rewrite cache entries. Returns number of rows deleted."""
         with self._connect() as conn:
-            cur = conn.execute("DELETE FROM gemini_rewrite_cache")
+            cur = conn.execute("DELETE FROM gemini_rewrite_cache WHERE provider = 'gemini'")
             conn.commit()
             return cur.rowcount
+
+    def clear_ai_rewrite_cache(self, provider: str | None = None) -> int:
+        """Clear AI rewrite cache entries. If provider is None, clears all providers."""
+        if provider:
+            cur = self._connect().execute(
+                "DELETE FROM gemini_rewrite_cache WHERE provider = ?",
+                (provider,)
+            )
+        else:
+            cur = self._connect().execute("DELETE FROM gemini_rewrite_cache")
+        cur.connection.commit()
+        return cur.rowcount
 
     def get_gemini_cache_size(self) -> int:
         """Get current cache size (number of entries)."""

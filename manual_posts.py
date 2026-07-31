@@ -44,7 +44,7 @@ from telegram_publisher import (
     SAFE_CAPTION_LENGTH,
     build_compact_product_summary,
 )
-from gemini_rewriter import rewrite_caption
+from ai_rewriter import rewrite_caption
 from multi_publisher import publish_to_destinations
 from upload_prep import prepare_channel_upload
 from coupon_price import coupon_apply_kwargs_from_product, normalize_caption_price_line
@@ -715,23 +715,24 @@ async def handle_publish_draft(
         products = _extract_products_from_draft(draft)
         published_product_count = len(products)
 
-        # Apply Gemini AI rewrite if enabled and this is a single ASIN draft
-        # (Composite manual posts do not use Gemini)
-        apply_gemini = db.get_gemini_enabled() and published_product_count == 1
+        # Apply AI rewrite if this is a single ASIN draft
+        # Business logic: only rewrite single products, not composites
+        # Provider enable/disable is handled by ai_rewriter.py
+        apply_ai_rewrite = published_product_count == 1
         reason = "single validated product" if published_product_count == 1 else f"{published_product_count} validated products"
         logger.info(
-            "MANUAL POST → GEMINI DECISION\n"
+            "MANUAL POST → AI REWRITE DECISION\n"
             "  draft_asins=%s\n"
             "  validated_products=%s\n"
             "  should_rewrite=%s\n"
             "  reason=%s",
             len(draft_asins),
             published_product_count,
-            apply_gemini,
+            apply_ai_rewrite,
             reason,
         )
-        if apply_gemini:
-            logger.info("MANUAL POST → CALLING GEMINI REWRITE FUNCTION")
+        if apply_ai_rewrite:
+            logger.info("MANUAL POST → CALLING AI REWRITE FUNCTION")
             caption = rewrite_caption(caption, db, log_prefix="MANUAL POST")
 
         # Get enabled destinations

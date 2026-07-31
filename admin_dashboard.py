@@ -44,6 +44,7 @@ from conversation_states import (
     AWAIT_DESTINATION_TITLE,
     AWAIT_DESTINATION_CHAT_ID,
     AWAIT_GEMINI_SYSTEM_PROMPT,
+    AWAIT_CHATGPT_REWRITE_PROMPT,
 )
 from telethon_auth import (
     AUTH_STATE_CODE,
@@ -157,6 +158,14 @@ CB_GEMINI_TEMPERATURE = "adm:gemini:temperature"
 CB_GEMINI_MAX_TOKENS = "adm:gemini:max_tokens"
 CB_GEMINI_TEST_REWRITE = "adm:gemini:test_rewrite"
 CB_GEMINI_CLEAR_CACHE = "adm:gemini:clear_cache"
+CB_CHATGPT = "adm:chatgpt"
+CB_CHATGPT_ENABLE = "adm:chatgpt:enable"
+CB_CHATGPT_DISABLE = "adm:chatgpt:disable"
+CB_CHATGPT_EDIT_PROMPT = "adm:chatgpt:edit_prompt"
+CB_CHATGPT_PREVIEW_PROMPT = "adm:chatgpt:preview_prompt"
+CB_CHATGPT_SKIP_CACHE = "adm:chatgpt:skip_cache"
+CB_CHATGPT_TEST_REWRITE = "adm:chatgpt:test_rewrite"
+CB_CHATGPT_CLEAR_CACHE = "adm:chatgpt:clear_cache"
 
 UD_PENDING_RESTORE = "pending_restore_zip"
 
@@ -218,6 +227,7 @@ def _main_keyboard(paused: bool, telethon_connected: bool = True) -> InlineKeybo
             ],
             [
                 InlineKeyboardButton("🤖 Gemini AI", callback_data=CB_GEMINI),
+                InlineKeyboardButton("💬 ChatGPT AI", callback_data=CB_CHATGPT),
             ],
             [
                 InlineKeyboardButton("🖼 Custom Image Post", callback_data=CB_CUSTOM_IMAGE_POST),
@@ -612,14 +622,14 @@ def _gemini_menu_text(db: Database) -> str:
     cache_size = db.get_gemini_cache_size()
     status = "✅ ON" if enabled else "❌ OFF"
     return (
-        f"🤖 <b>Gemini AI Rewrite</b>\n\n"
+        f"🤖 <b>Gemini AI Settings</b>\n\n"
         f"Status: <b>{status}</b>\n"
         f"Model: <code>{model}</code>\n"
         f"Temperature: <code>{temperature}</code>\n"
         f"Max Tokens: <code>{max_tokens}</code>\n"
         f"Cache Size: <code>{cache_size}</code> entries\n\n"
-        f"Rewrite captions using Google Gemini AI.\n"
-        f"Configure the system prompt and model settings below."
+        f"Rewrite captions using Gemini AI.\n"
+        f"Configure settings below."
     )
 
 
@@ -647,6 +657,50 @@ def _gemini_keyboard(db: Database) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("🧪 Test Rewrite", callback_data=CB_GEMINI_TEST_REWRITE),
                 InlineKeyboardButton("🧹 Clear Cache", callback_data=CB_GEMINI_CLEAR_CACHE),
+            ],
+            [InlineKeyboardButton("« Back", callback_data=CB_MAIN)],
+        ]
+    )
+
+
+def _chatgpt_menu_text(db: Database) -> str:
+    enabled = db.get_chatgpt_rewrite_enabled()
+    skip_cache = db.get_chatgpt_skip_cache()
+    status = "✅ ON" if enabled else "❌ OFF"
+    cache_status = "Skip" if skip_cache else "Use"
+    return (
+        f"💬 <b>ChatGPT AI Settings</b>\n\n"
+        f"Status: <b>{status}</b>\n"
+        f"Cache: <b>{cache_status}</b>\n\n"
+        f"Rewrite captions using ChatGPT.\n"
+        f"Configure settings below."
+    )
+
+
+def _chatgpt_keyboard(db: Database) -> InlineKeyboardMarkup:
+    enabled = db.get_chatgpt_rewrite_enabled()
+    skip_cache = db.get_chatgpt_skip_cache()
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Enable" if not enabled else "❌ Disable",
+                    callback_data=CB_CHATGPT_ENABLE if not enabled else CB_CHATGPT_DISABLE,
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "✅ Cache ON" if not skip_cache else "❌ Cache OFF",
+                    callback_data=CB_CHATGPT_SKIP_CACHE,
+                ),
+            ],
+            [
+                InlineKeyboardButton("� Edit Rewrite Prompt", callback_data=CB_CHATGPT_EDIT_PROMPT),
+                InlineKeyboardButton("👁 Preview Prompt", callback_data=CB_CHATGPT_PREVIEW_PROMPT),
+            ],
+            [
+                InlineKeyboardButton("🧪 Test Rewrite", callback_data=CB_CHATGPT_TEST_REWRITE),
+                InlineKeyboardButton("🧹 Clear Cache", callback_data=CB_CHATGPT_CLEAR_CACHE),
             ],
             [InlineKeyboardButton("« Back", callback_data=CB_MAIN)],
         ]
@@ -1596,6 +1650,109 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             )
         return ConversationHandler.END
 
+    if data == CB_CHATGPT:
+        await _safe_edit_message_text(
+            query,
+            _chatgpt_menu_text(db),
+            reply_markup=_chatgpt_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_CHATGPT_ENABLE:
+        db.set_chatgpt_rewrite_enabled(True)
+        await _safe_edit_message_text(
+            query,
+            _chatgpt_menu_text(db),
+            reply_markup=_chatgpt_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_CHATGPT_DISABLE:
+        db.set_chatgpt_rewrite_enabled(False)
+        await _safe_edit_message_text(
+            query,
+            _chatgpt_menu_text(db),
+            reply_markup=_chatgpt_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_CHATGPT_SKIP_CACHE:
+        current = db.get_chatgpt_skip_cache()
+        db.set_chatgpt_skip_cache(not current)
+        await _safe_edit_message_text(
+            query,
+            _chatgpt_menu_text(db),
+            reply_markup=_chatgpt_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_CHATGPT_EDIT_PROMPT:
+        context.user_data["chatgpt_setting"] = "edit_prompt"
+        await _safe_edit_message_text(
+            query,
+            "📝 <b>Edit Rewrite Prompt</b>\n\n"
+            "Send the new ChatGPT rewrite prompt.\n\n"
+            "This prompt will be used to rewrite captions.\n\n"
+            "/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return AWAIT_CHATGPT_REWRITE_PROMPT
+
+    if data == CB_CHATGPT_PREVIEW_PROMPT:
+        prompt = db.get_chatgpt_rewrite_prompt()
+        if not prompt:
+            preview = "No custom prompt set. Using default ChatGPT safety prompt."
+        else:
+            preview = f"<pre>{prompt}</pre>"
+        await _safe_edit_message_text(
+            query,
+            f"👁 <b>Preview Rewrite Prompt</b>\n\n"
+            f"{preview}",
+            reply_markup=_chatgpt_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == CB_CHATGPT_TEST_REWRITE:
+        context.user_data["chatgpt_setting"] = "test_rewrite"
+        await _safe_edit_message_text(
+            query,
+            "🧪 <b>Test Rewrite</b>\n\n"
+            "Send a caption to test the ChatGPT rewrite.\n\n"
+            "You will receive:\n"
+            "• Original Caption\n"
+            "• ChatGPT Rewrite\n"
+            "• Execution Time\n\n"
+            "Nothing will be published.\n\n"
+            "/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return AWAIT_CHATGPT_REWRITE_PROMPT
+
+    if data == CB_CHATGPT_CLEAR_CACHE:
+        deleted = db.clear_ai_rewrite_cache("chatgpt")
+        if deleted == 0:
+            await _safe_edit_message_text(
+                query,
+                "🧹 <b>Clear Rewrite Cache</b>\n\n"
+                "Cache is already empty.",
+                reply_markup=_chatgpt_keyboard(db),
+                parse_mode="HTML",
+            )
+        else:
+            await _safe_edit_message_text(
+                query,
+                f"🧹 <b>Clear Rewrite Cache</b>\n\n"
+                f"✅ Deleted {deleted} cache entries.",
+                reply_markup=_chatgpt_keyboard(db),
+                parse_mode="HTML",
+            )
+        return ConversationHandler.END
+
     if data == CB_DESTINATIONS:
         await _safe_edit_message_text(
             query,
@@ -2039,6 +2196,66 @@ async def receive_destination_title(
     return AWAIT_DESTINATION_CHAT_ID
 
 
+async def receive_chatgpt_setting(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if not is_admin(update.effective_user.id if update.effective_user else None):
+        return ConversationHandler.END
+
+    msg = update.message
+    text = (msg.text or "").strip()
+    db = _db(context)
+
+    # Check which setting we're editing
+    setting = context.user_data.pop("chatgpt_setting", None)
+
+    if setting == "test_rewrite":
+        # Test rewrite mode
+        from ai_rewriter import rewrite_caption
+        import time
+
+        original = text
+        start_time = time.time()
+        rewritten = rewrite_caption(original, db, skip_cache=True, log_prefix="TEST CHATGPT")
+        duration_ms = int((time.time() - start_time) * 1000)
+
+        # Build response
+        response_parts = [
+            "🧪 <b>Test Rewrite Results</b>\n\n",
+            "<b>Original Caption:</b>",
+            f"<code>{original[:500]}{'...' if len(original) > 500 else ''}</code>",
+            "\n\n",
+            "<b>Rewritten Caption:</b>",
+            f"<code>{rewritten[:500]}{'...' if len(rewritten) > 500 else ''}</code>",
+            "\n\n",
+            f"⏱ Execution Time: <code>{duration_ms}ms</code>",
+        ]
+
+        await msg.reply_text(
+            "".join(response_parts),
+            parse_mode="HTML",
+            reply_markup=_chatgpt_keyboard(db),
+        )
+        return ConversationHandler.END
+
+    elif setting == "edit_prompt":
+        # Setting rewrite prompt
+        db.set_chatgpt_rewrite_prompt(text)
+        await msg.reply_text(
+            f"✅ Rewrite prompt saved.",
+            parse_mode="HTML",
+            reply_markup=_chatgpt_keyboard(db),
+        )
+        return ConversationHandler.END
+
+    # Unknown setting
+    await msg.reply_text(
+        "Unknown setting. Please try again.",
+        reply_markup=_chatgpt_keyboard(db),
+    )
+    return ConversationHandler.END
+
+
 async def receive_gemini_setting(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
@@ -2054,12 +2271,12 @@ async def receive_gemini_setting(
 
     if setting == "test_rewrite":
         # Test rewrite mode
-        from gemini_rewriter import rewrite_caption
+        from ai_rewriter import rewrite_caption
         import time
 
         original = text
         start_time = time.time()
-        rewritten = rewrite_caption(original, db, skip_cache=True)
+        rewritten = rewrite_caption(original, db, skip_cache=True, log_prefix="TEST GEMINI")
         duration_ms = int((time.time() - start_time) * 1000)
 
         # Build response
@@ -2496,6 +2713,12 @@ def build_admin_handlers() -> list:
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND & admin_filter,
                     receive_gemini_setting,
+                ),
+            ],
+            AWAIT_CHATGPT_REWRITE_PROMPT: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & admin_filter,
+                    receive_chatgpt_setting,
                 ),
             ],
             **manual_states,

@@ -62,7 +62,7 @@ from telegram_publisher import build_caption, publish_to_channel_with_overflow
 from published_price import extract_published_price_fields
 from backup_restore import maybe_notify_restore_complete
 from inline_buttons import build_inline_keyboard
-from gemini_rewriter import rewrite_caption
+from ai_rewriter import rewrite_caption
 from upload_prep import to_jpeg_for_telegram
 
 logging.basicConfig(
@@ -187,7 +187,7 @@ async def publish_validated_product(
     db: Database,
     validated_data: dict,
     msg: Message,
-    apply_gemini: bool,
+    apply_ai_rewrite: bool,
 ) -> bool:
     """
     Publish a previously validated product.
@@ -210,9 +210,10 @@ async def publish_validated_product(
 
         logger.info("PUBLISHING VALIDATED PRODUCT %s asin=%s", index, asin)
 
-        # Apply Gemini AI rewrite if enabled and this is a single ASIN source post
-        if apply_gemini:
-            logger.info("SOURCE POST → CALLING GEMINI REWRITE FUNCTION")
+        # Apply AI rewrite if business logic allows (single product only)
+        # Provider enable/disable is handled by ai_rewriter.py
+        if apply_ai_rewrite:
+            logger.info("SOURCE POST → CALLING AI REWRITE FUNCTION")
             caption = rewrite_caption(caption, db, log_prefix="SOURCE POST")
 
         upload_image = to_jpeg_for_telegram(product["screenshot"])
@@ -605,11 +606,12 @@ async def process_message(application, msg: Message) -> None:
                         resolved_count,
                     )
 
-                    # Decide on Gemini based on actual validated count in this chunk
-                    apply_gemini = db.get_gemini_enabled() and resolved_count == 1
+                    # Decide on AI rewrite based on actual validated count in this chunk
+                    # Business logic: only rewrite single products, not composites
+                    apply_ai_rewrite = resolved_count == 1
                     reason = "single validated product" if resolved_count == 1 else f"{resolved_count} validated products"
                     logger.info(
-                        "CHUNK %s/%s: GEMINI DECISION\n"
+                        "CHUNK %s/%s: AI REWRITE DECISION\n"
                         "  original_urls=%s\n"
                         "  validated_products=%s\n"
                         "  should_rewrite=%s\n"
@@ -618,7 +620,7 @@ async def process_message(application, msg: Message) -> None:
                         len(url_chunks),
                         len(chunk),
                         resolved_count,
-                        apply_gemini,
+                        apply_ai_rewrite,
                         reason,
                     )
 
@@ -630,7 +632,7 @@ async def process_message(application, msg: Message) -> None:
                             db,
                             validated,
                             msg,
-                            apply_gemini,
+                            apply_ai_rewrite,
                         )
                         if ok:
                             published += 1
@@ -662,18 +664,19 @@ async def process_message(application, msg: Message) -> None:
                 resolved_count,
             )
 
-            # Phase 2: Decide on Gemini based on actual validated count
-            apply_gemini = db.get_gemini_enabled() and resolved_count == 1
+            # Phase 2: Decide on AI rewrite based on actual validated count
+            # Business logic: only rewrite single products, not composites
+            apply_ai_rewrite = resolved_count == 1
             reason = "single validated product" if resolved_count == 1 else f"{resolved_count} validated products"
             logger.info(
-                "SOURCE POST → GEMINI DECISION\n"
+                "SOURCE POST → AI REWRITE DECISION\n"
                 "  original_urls=%s\n"
                 "  validated_products=%s\n"
                 "  should_rewrite=%s\n"
                 "  reason=%s",
                 total,
                 resolved_count,
-                apply_gemini,
+                apply_ai_rewrite,
                 reason,
             )
 
@@ -685,7 +688,7 @@ async def process_message(application, msg: Message) -> None:
                     db,
                     validated,
                     msg,
-                    apply_gemini,
+                    apply_ai_rewrite,
                 )
                 if ok:
                     published += 1
