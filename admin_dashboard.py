@@ -2210,10 +2210,12 @@ async def receive_chatgpt_setting(
     setting = context.user_data.pop("chatgpt_setting", None)
 
     if setting == "test_rewrite":
-        # Test rewrite mode
-        from ai_rewriter import rewrite_caption
+        # Test rewrite mode - call ChatGPT directly
+        from chatgpt_rewriter import rewrite_caption
         import time
 
+        logger.info("TEST CHATGPT → ENTERING CHATGPT TEST")
+        
         original = text
         start_time = time.time()
         rewritten = rewrite_caption(original, db, skip_cache=True, log_prefix="TEST CHATGPT")
@@ -2270,10 +2272,12 @@ async def receive_gemini_setting(
     setting = context.user_data.pop("gemini_setting", None)
 
     if setting == "test_rewrite":
-        # Test rewrite mode
-        from ai_rewriter import rewrite_caption
+        # Test rewrite mode - call Gemini directly
+        from gemini_rewriter import rewrite_caption
         import time
 
+        logger.info("TEST GEMINI → ENTERING GEMINI TEST")
+        
         original = text
         start_time = time.time()
         rewritten = rewrite_caption(original, db, skip_cache=True, log_prefix="TEST GEMINI")
