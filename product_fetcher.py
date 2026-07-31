@@ -35,6 +35,11 @@ logger = logging.getLogger(__name__)
 _FALLBACK_BODY_LIMIT = 500
 
 
+def _valid_price(text: str | None) -> bool:
+    """Check if price is valid (not None, not empty, not 'Not found')."""
+    return bool(text) and text.strip() != "Not found"
+
+
 def _fallback_reason(exc: CreatorsAPIError) -> str:
     if exc.status_code == 403:
         return "HTTP 403 Forbidden"
@@ -361,6 +366,19 @@ async def fetch_products(
                 for asin in chunk_asins:
                     item = items.get(asin)
                     if item and item.title != "Not found":
+                        # Validate price before proceeding
+                        if not _valid_price(item.price):
+                            logger.warning(
+                                "PRODUCT SKIPPED\n"
+                                "  reason=price_not_found\n"
+                                "  asin=%s\n"
+                                "  raw_price=%r",
+                                asin,
+                                item.price,
+                            )
+                            failed += 1
+                            continue
+                        
                         clean_url = clean_urls.get(asin, "")
                         scrape_key = f"{scrape_key_prefix}_{asin}_{int(time.time() * 1000)}"
                         coupon_scan: dict | None = None
@@ -483,6 +501,19 @@ async def fetch_products(
                         product["image_url"] = None
                         product["detail_page_url"] = ""
                         product["asin"] = asin
+                        
+                        # Validate price after Playwright scrape
+                        if not _valid_price(product.get("price")):
+                            logger.warning(
+                                "PRODUCT SKIPPED\n"
+                                "  reason=price_not_found\n"
+                                "  asin=%s\n"
+                                "  raw_price=%r",
+                                asin,
+                                product.get("price"),
+                            )
+                            failed += 1
+                            continue
 
                         if frame_enabled and product.get("screenshot"):
                             framed = _maybe_apply_frame(
@@ -550,62 +581,74 @@ async def fetch_product(
             )
             item = items.get(asin.upper())
             if item and item.title != "Not found":
-                product: dict = {
-                    "asin": asin.upper(),
-                    "title": item.title,
-                    "price": item.price,
-                    "list_price": item.list_price,
-                    "image_url": item.image_url,
-                    "detail_page_url": item.detail_page_url,
-                    "features": item.features,
-                    "seller_name": item.seller_name,
-                    "coupon": None,
-                    "coupon_already_applied": False,
-                    "data_source": "creators",
-                    "screenshot": None,
-                }
-
-                if coupon_enabled and browser is not None:
-                    logger.info("COUPON SCAN START asin=%s", asin)
-                    coupon_scan = await scrape_coupon_and_screenshot(
-                        browser,
-                        clean_url,
-                        scrape_key,
-                        coupon_detection_enabled=True,
-                        capture_screenshot=frame_enabled,
+                # Validate price before proceeding
+                if not _valid_price(item.price):
+                    logger.warning(
+                        "PRODUCT SKIPPED\n"
+                        "  reason=price_not_found\n"
+                        "  asin=%s\n"
+                        "  raw_price=%r",
+                        asin.upper(),
+                        item.price,
                     )
-                    _merge_coupon_data(product, coupon_scan)
+                    # Fall through to Playwright fallback
+                else:
+                    product: dict = {
+                        "asin": asin.upper(),
+                        "title": item.title,
+                        "price": item.price,
+                        "list_price": item.list_price,
+                        "image_url": item.image_url,
+                        "detail_page_url": item.detail_page_url,
+                        "features": item.features,
+                        "seller_name": item.seller_name,
+                        "coupon": None,
+                        "coupon_already_applied": False,
+                        "data_source": "creators",
+                        "screenshot": None,
+                    }
 
-                frame_title = await resolve_frame_title(asin, item.title, db=db)
+                    if coupon_enabled and browser is not None:
+                        logger.info("COUPON SCAN START asin=%s", asin)
+                        coupon_scan = await scrape_coupon_and_screenshot(
+                            browser,
+                            clean_url,
+                            scrape_key,
+                            coupon_detection_enabled=True,
+                            capture_screenshot=frame_enabled,
+                        )
+                        _merge_coupon_data(product, coupon_scan)
 
-                product["screenshot"] = await _resolve_product_image(
-                    browser,
-                    asin=asin,
-                    clean_url=clean_url,
-                    scrape_key=scrape_key,
-                    image_url=item.image_url,
-                    frame_enabled=frame_enabled,
-                    coupon_enabled=coupon_enabled,
-                    coupon_scan=coupon_scan,
-                    title=frame_title,
-                    price=item.price,
-                    list_price=item.list_price,
-                    prime_exclusive=item.prime_exclusive,
-                    seller_name=item.seller_name,
-                    db=db,
-                )
+                    frame_title = await resolve_frame_title(asin, item.title, db=db)
 
-                logger.info(
-                    "SCRAPER DEBUG title=%r price=%r list_price=%r coupon=%r "
-                    "coupon_already_applied=%s seller_name=%r source=creators",
-                    product["title"],
-                    product["price"],
-                    product.get("list_price"),
-                    product.get("coupon"),
-                    product.get("coupon_already_applied"),
-                    product.get("seller_name"),
-                )
-                return product
+                    product["screenshot"] = await _resolve_product_image(
+                        browser,
+                        asin=asin,
+                        clean_url=clean_url,
+                        scrape_key=scrape_key,
+                        image_url=item.image_url,
+                        frame_enabled=frame_enabled,
+                        coupon_enabled=coupon_enabled,
+                        coupon_scan=coupon_scan,
+                        title=frame_title,
+                        price=item.price,
+                        list_price=item.list_price,
+                        prime_exclusive=item.prime_exclusive,
+                        seller_name=item.seller_name,
+                        db=db,
+                    )
+
+                    logger.info(
+                        "SCRAPER DEBUG title=%r price=%r list_price=%r coupon=%r "
+                        "coupon_already_applied=%s seller_name=%r source=creators",
+                        product["title"],
+                        product["price"],
+                        product.get("list_price"),
+                        product.get("coupon"),
+                        product.get("coupon_already_applied"),
+                        product.get("seller_name"),
+                    )
+                    return product
         except RuntimeError:
             raise
         except CreatorsAPIError as exc:
@@ -628,6 +671,18 @@ async def fetch_product(
     product["image_url"] = None
     product["detail_page_url"] = ""
     product["asin"] = asin.upper()
+    
+    # Validate price after Playwright scrape
+    if not _valid_price(product.get("price")):
+        logger.warning(
+            "PRODUCT SKIPPED\n"
+            "  reason=price_not_found\n"
+            "  asin=%s\n"
+            "  raw_price=%r",
+            asin.upper(),
+            product.get("price"),
+        )
+        raise RuntimeError(f"Product price not found for asin={asin}")
 
     if frame_enabled and product.get("screenshot"):
         framed = _maybe_apply_frame(
