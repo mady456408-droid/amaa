@@ -1525,6 +1525,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     if data == CB_GEMINI_ENABLE:
         db.set_gemini_enabled(True)
+        db.set_ai_provider("gemini")
         await _safe_edit_message_text(
             query,
             _gemini_menu_text(db),
@@ -1661,6 +1662,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     if data == CB_CHATGPT_ENABLE:
         db.set_chatgpt_rewrite_enabled(True)
+        db.set_ai_provider("chatgpt")
         await _safe_edit_message_text(
             query,
             _chatgpt_menu_text(db),

@@ -33,6 +33,12 @@ def rewrite_caption(caption: str, db: Any, skip_cache: bool = False, log_prefix:
 
     # Get selected provider
     provider = db.get_ai_provider()
+    gemini_enabled = db.get_gemini_enabled()
+    chatgpt_enabled = db.get_chatgpt_rewrite_enabled()
+    
+    logger.info(f"{log_prefix} → AI PROVIDER FROM DB = {provider}")
+    logger.info(f"{log_prefix} → GEMINI ENABLED = {gemini_enabled}")
+    logger.info(f"{log_prefix} → CHATGPT ENABLED = {chatgpt_enabled}")
     logger.info(f"{log_prefix} → AI PROVIDER = {provider.upper()}")
 
     # Dispatch to appropriate provider
