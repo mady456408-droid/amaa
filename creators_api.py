@@ -590,6 +590,13 @@ def extract_seller_offer(
     return ("AVAILABLE", lowest_offer[1], lowest_offer[0], lowest_offer[2], lowest_offer[3], lowest_offer[4])
 
 
+def _pick_buy_box_listing(listings: list[dict]) -> dict | None:
+    for listing in listings:
+        if listing.get("isBuyBoxWinner"):
+            return listing
+    return listings[0] if listings else None
+
+
 def _contains_arabic(text: str) -> bool:
     return any(
         "\u0600" <= ch <= "\u06FF" or "\u0750" <= ch <= "\u077F" for ch in text
