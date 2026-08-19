@@ -1485,15 +1485,24 @@ class Database:
         created_by: int,
         coupon: str | None = None,
         list_price: str | None = None,
+        seller_type: str = "NEW_AMAZON",
     ) -> int:
+        if not asin or not title or not price or price == "Not found" or not clean_url or not caption or not image_path:
+            raise ValueError(
+                f"Cannot create draft post for ASIN {asin}: missing or invalid required fields "
+                f"(price={price!r}, image_path={image_path!r}, seller_type={seller_type!r})"
+            )
+        if seller_type not in ("NEW_AMAZON", "AMAZON_RESALE"):
+            raise ValueError(f"Invalid seller_type: {seller_type!r}")
+
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO draft_posts
                     (asin, title, price, clean_url, caption, image_path, status,
-                     created_at, created_by, coupon, list_price)
-                VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)
+                     created_at, created_by, coupon, list_price, seller_type)
+                VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)
                 """,
                 (
                     asin.upper(),
@@ -1506,6 +1515,7 @@ class Database:
                     created_by,
                     coupon,
                     list_price,
+                    seller_type,
                 ),
             )
             conn.commit()

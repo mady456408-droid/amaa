@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -15,6 +16,7 @@ from conversation_states import AWAIT_DRAFT_CAPTION
 from amazon_scraper import BrowserManager
 from amazon_shortener import shorten_amazon_url
 from product_fetcher import fetch_product, resolve_display_url
+from creators_api import NEW_AMAZON_SELLER_ID, AMAZON_RESALE_SELLER_ID
 from database import Database
 from duplicate_moderation import send_approval_request
 from file_cleanup import cleanup_files
@@ -279,6 +281,14 @@ async def prepare_draft_from_input(
             return None
 
         asin, clean_url = resolved
+        seller_type = (
+            "AMAZON_RESALE"
+            if ("A2N2MP47XAP1MK" in item or "m=A2N2MP47XAP1MK" in item or "A2N2MP47XAP1MK" in clean_url or "m=A2N2MP47XAP1MK" in clean_url)
+            else "NEW_AMAZON"
+        )
+        merchant_id = AMAZON_RESALE_SELLER_ID if seller_type == "AMAZON_RESALE" else NEW_AMAZON_SELLER_ID
+        clean_url = build_clean_url(asin, AMAZON_DOMAIN, merchant_id=merchant_id if seller_type == "AMAZON_RESALE" else None)
+
         coupon_enabled = db.get_coupon_detection_enabled()
         product = await fetch_product(
             db,
@@ -287,19 +297,48 @@ async def prepare_draft_from_input(
             clean_url,
             scrape_key,
             coupon_enabled=coupon_enabled,
+            seller_type=seller_type,
         )
+
+        # STRICT SELLER & PRODUCT VALIDATION (EARLY ABORT BEFORE ANY DOWNSTREAM WORK)
+        if (
+            not product
+            or product.get("seller_offer_available") is False
+            or product.get("price") == "Not found"
+            or not product.get("price")
+            or product.get("title") == "Not found"
+            or not product.get("title")
+        ):
+            if seller_type == "AMAZON_RESALE":
+                logger.warning(
+                    "MANUAL DRAFT ABORTED — Amazon Resale offer missing/OOS asin=%s merchant_id=%s action=ABORT_DRAFT",
+                    asin,
+                    AMAZON_RESALE_SELLER_ID,
+                )
+            else:
+                logger.warning(
+                    "MANUAL DRAFT ABORTED — NEW Amazon offer missing/OOS asin=%s merchant_id=%s action=ABORT_DRAFT",
+                    asin,
+                    NEW_AMAZON_SELLER_ID,
+                )
+            if product and product.get("screenshot"):
+                cleanup_files([product["screenshot"]])
+            return None
+
+        screenshot_path = product.get("screenshot")
+        if not screenshot_path or not os.path.exists(screenshot_path):
+            logger.error("DRAFT PREPARATION FAILED — screenshot path missing or file does not exist")
+            if screenshot_path:
+                cleanup_files([screenshot_path])
+            return None
+
+        temp_files.append(screenshot_path)
+
         display_url = resolve_display_url(product, clean_url)
-        # Try to shorten the URL using Amazon SiteStripe
+        # Try to shorten the URL using Amazon SiteStripe AFTER seller validation succeeds
         short_url = await shorten_amazon_url(display_url, db)
         if short_url:
             display_url = short_url
-        screenshot_path = product["screenshot"]
-        temp_files.append(screenshot_path)
-
-        if product["title"] == "Not found":
-            logger.warning("Scrape failed — title not found for asin=%s", asin)
-            cleanup_files([screenshot_path])
-            return None
 
         coupon = product.get("coupon") if coupon_enabled else None
         logger.info(
@@ -310,26 +349,14 @@ async def prepare_draft_from_input(
             product.get("list_price"),
             product.get("coupon_already_applied"),
         )
-        coupon_kwargs = (
-            coupon_apply_kwargs_from_product(product) if coupon_enabled else {}
+        caption = await build_product_caption(
+            db,
+            product["title"],
+            product["price"],
+            display_url,
+            coupon=coupon,
+            product=product,
         )
-        if product["price"] == "Not found":
-            caption = build_caption(
-                product["title"],
-                product["price"],
-                display_url,
-                coupon=coupon,
-                coupon_kwargs=coupon_kwargs,
-            )
-        else:
-            caption = await build_product_caption(
-                db,
-                product["title"],
-                product["price"],
-                display_url,
-                coupon=coupon,
-                product=product,
-            )
 
         held_image = screenshot_path
         if held_image in temp_files:
@@ -345,9 +372,10 @@ async def prepare_draft_from_input(
             created_by=admin_id,
             coupon=coupon,
             list_price=product.get("list_price"),
+            seller_type=seller_type,
         )
         draft = db.get_draft_post(draft_id)
-        logger.info("DRAFT CREATED draft_id=%s asin=%s", draft_id, asin)
+        logger.info("DRAFT CREATED draft_id=%s asin=%s seller_type=%s", draft_id, asin, seller_type)
         logger.info("DRAFT IMAGE RETAINED path=%s", held_image)
         return draft, held_image
     except RuntimeError as exc:
@@ -546,9 +574,17 @@ async def process_manual_text(
                 continue
             raise
         if not prepared:
+            seller_type = (
+                "AMAZON_RESALE"
+                if ("A2N2MP47XAP1MK" in item or "m=A2N2MP47XAP1MK" in item)
+                else "NEW_AMAZON"
+            )
+            if seller_type == "AMAZON_RESALE":
+                err_text = "❌ Amazon Resale offer is currently unavailable."
+            else:
+                err_text = "❌ Amazon New offer is currently unavailable."
             await msg.reply_text(
-                f"Could not prepare (scrape failed or invalid input): "
-                f"<code>{item[:80]}</code>",
+                f"{err_text}\n<code>{item[:80]}</code>",
                 parse_mode="HTML",
             )
             continue
