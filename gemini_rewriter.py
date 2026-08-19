@@ -22,6 +22,7 @@ Never change:
 - product model numbers
 - brand names
 - numeric values
+- Amazon Resale / Used product status (do not convert Resale to NEW)
 
 Do not invent information.
 Do not remove information.

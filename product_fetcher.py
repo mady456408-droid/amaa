@@ -22,9 +22,12 @@ from amazon_scraper import (
 )
 from config import FRAME_PRODUCT_IMAGES, USER_AGENT
 from creators_api import (
+    AMAZON_RESALE_SELLER_ID,
     DRAFT_PROFILE,
+    NEW_AMAZON_SELLER_ID,
     CreatorsAPIError,
     creators_api_configured,
+    extract_seller_offer,
     get_creators_client,
 )
 from creators_title import resolve_frame_title
@@ -132,10 +135,21 @@ def _require_screenshot(path: str | None, *, asin: str) -> str:
 def resolve_display_url(product: dict, clean_url: str) -> str:
     """
     Always apply affiliate tag to display URLs regardless of data source.
+    Ensures merchant_id (e.g. A2N2MP47XAP1MK for Resale) is preserved.
     """
+    merchant_id = product.get("merchant_id")
+    if not merchant_id and product.get("seller_type") == "AMAZON_RESALE":
+        merchant_id = "A2N2MP47XAP1MK"
+
+    url = clean_url
     if product.get("data_source") == "creators" and product.get("detail_page_url"):
-        return apply_affiliate_tag(product["detail_page_url"])
-    return apply_affiliate_tag(clean_url)
+        url = product["detail_page_url"]
+
+    if merchant_id and "m=" not in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}m={merchant_id}"
+
+    return apply_affiliate_tag(url)
 
 
 async def _download_image(url: str, dest_path: str, *, quiet: bool = False) -> bool:
@@ -562,14 +576,17 @@ async def fetch_product(
     *,
     coupon_enabled: bool,
     frame_enabled: bool = FRAME_PRODUCT_IMAGES,
+    seller_type: str = "NEW_AMAZON",
 ) -> dict:
     """
-    Fetch product data for drafts and auto posts.
+    Fetch product data for drafts, auto posts, and republishing.
 
+    Enforces seller_type ('NEW_AMAZON' or 'AMAZON_RESALE') strictly.
     Returns a dict compatible with existing caption/publish pipelines.
     """
     client = get_creators_client()
     coupon_scan: dict | None = None
+    target_merchant_id = NEW_AMAZON_SELLER_ID if seller_type == "NEW_AMAZON" else AMAZON_RESALE_SELLER_ID
 
     if client and creators_api_configured():
         try:
@@ -580,75 +597,105 @@ async def fetch_product(
                 profile="draft",
             )
             item = items.get(asin.upper())
-            if item and item.title != "Not found":
-                # Validate price before proceeding
-                if not _valid_price(item.price):
-                    logger.warning(
-                        "PRODUCT SKIPPED\n"
-                        "  reason=price_not_found\n"
-                        "  asin=%s\n"
-                        "  raw_price=%r",
-                        asin.upper(),
-                        item.price,
-                    )
-                    # Fall through to Playwright fallback
+            if not item or item.title == "Not found":
+                if seller_type == "AMAZON_RESALE":
+                    logger.warning("RESALE OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin.upper())
                 else:
-                    product: dict = {
-                        "asin": asin.upper(),
-                        "title": item.title,
-                        "price": item.price,
-                        "list_price": item.list_price,
-                        "image_url": item.image_url,
-                        "detail_page_url": item.detail_page_url,
-                        "features": item.features,
-                        "seller_name": item.seller_name,
-                        "coupon": None,
-                        "coupon_already_applied": False,
-                        "data_source": "creators",
-                        "screenshot": None,
-                    }
+                    logger.warning("NEW OFFER MISSING asin=%s action=ABORT_PUBLISH", asin.upper())
+                return {
+                    "asin": asin.upper(),
+                    "title": getattr(item, "title", "Not found") if item else "Not found",
+                    "price": "Not found",
+                    "seller_type": seller_type,
+                    "merchant_id": target_merchant_id,
+                    "seller_offer_available": False,
+                    "data_source": "creators",
+                    "screenshot": None,
+                }
 
-                    if coupon_enabled and browser is not None:
-                        logger.info("COUPON SCAN START asin=%s", asin)
-                        coupon_scan = await scrape_coupon_and_screenshot(
-                            browser,
-                            clean_url,
-                            scrape_key,
-                            coupon_detection_enabled=True,
-                            capture_screenshot=frame_enabled,
-                        )
-                        _merge_coupon_data(product, coupon_scan)
+            status, p_text, p_val, l_text, l_val, s_name = extract_seller_offer(item, seller_type)
 
-                    frame_title = await resolve_frame_title(asin, item.title, db=db)
+            if status != "AVAILABLE" or not p_text or p_text == "Not found":
+                if seller_type == "AMAZON_RESALE":
+                    logger.warning("RESALE OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin.upper())
+                else:
+                    logger.warning("NEW OFFER MISSING asin=%s action=ABORT_PUBLISH", asin.upper())
+                return {
+                    "asin": asin.upper(),
+                    "title": item.title,
+                    "price": "Not found",
+                    "seller_type": seller_type,
+                    "merchant_id": target_merchant_id,
+                    "seller_offer_available": False,
+                    "data_source": "creators",
+                    "screenshot": None,
+                }
 
-                    product["screenshot"] = await _resolve_product_image(
-                        browser,
-                        asin=asin,
-                        clean_url=clean_url,
-                        scrape_key=scrape_key,
-                        image_url=item.image_url,
-                        frame_enabled=frame_enabled,
-                        coupon_enabled=coupon_enabled,
-                        coupon_scan=coupon_scan,
-                        title=frame_title,
-                        price=item.price,
-                        list_price=item.list_price,
-                        prime_exclusive=item.prime_exclusive,
-                        seller_name=item.seller_name,
-                        db=db,
-                    )
+            if seller_type == "AMAZON_RESALE":
+                logger.info("RESALE OFFER FOUND merchant_id=%s price=%s availability=AVAILABLE", target_merchant_id, p_text)
+            else:
+                logger.info("NEW OFFER FOUND merchant_id=%s price=%s availability=AVAILABLE", target_merchant_id, p_text)
 
-                    logger.info(
-                        "SCRAPER DEBUG title=%r price=%r list_price=%r coupon=%r "
-                        "coupon_already_applied=%s seller_name=%r source=creators",
-                        product["title"],
-                        product["price"],
-                        product.get("list_price"),
-                        product.get("coupon"),
-                        product.get("coupon_already_applied"),
-                        product.get("seller_name"),
-                    )
-                    return product
+            product: dict = {
+                "asin": asin.upper(),
+                "title": item.title,
+                "price": p_text,
+                "list_price": l_text or item.list_price,
+                "image_url": item.image_url,
+                "detail_page_url": item.detail_page_url,
+                "features": item.features,
+                "seller_name": s_name or item.seller_name,
+                "seller_type": seller_type,
+                "merchant_id": target_merchant_id,
+                "seller_offer_available": True,
+                "coupon": None,
+                "coupon_already_applied": False,
+                "data_source": "creators",
+                "screenshot": None,
+            }
+
+            if coupon_enabled and browser is not None:
+                logger.info("COUPON SCAN START asin=%s", asin)
+                coupon_scan = await scrape_coupon_and_screenshot(
+                    browser,
+                    clean_url,
+                    scrape_key,
+                    coupon_detection_enabled=True,
+                    capture_screenshot=frame_enabled,
+                )
+                _merge_coupon_data(product, coupon_scan)
+
+            frame_title = await resolve_frame_title(asin, item.title, db=db)
+
+            product["screenshot"] = await _resolve_product_image(
+                browser,
+                asin=asin,
+                clean_url=clean_url,
+                scrape_key=scrape_key,
+                image_url=item.image_url,
+                frame_enabled=frame_enabled,
+                coupon_enabled=coupon_enabled,
+                coupon_scan=coupon_scan,
+                title=frame_title,
+                price=product["price"],
+                list_price=product["list_price"],
+                prime_exclusive=item.prime_exclusive,
+                seller_name=product["seller_name"],
+                db=db,
+            )
+
+            logger.info(
+                "SCRAPER DEBUG title=%r price=%r list_price=%r coupon=%r "
+                "coupon_already_applied=%s seller_name=%r seller_type=%s source=creators",
+                product["title"],
+                product["price"],
+                product.get("list_price"),
+                product.get("coupon"),
+                product.get("coupon_already_applied"),
+                product.get("seller_name"),
+                seller_type,
+            )
+            return product
         except RuntimeError:
             raise
         except CreatorsAPIError as exc:

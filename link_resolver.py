@@ -209,9 +209,12 @@ def extract_manual_inputs(text: str) -> list[str]:
     return inputs
 
 
-def build_clean_url(asin: str, domain: str) -> str:
+def build_clean_url(asin: str, domain: str, merchant_id: str | None = None) -> str:
     domain = domain.replace("https://", "").replace("http://", "").strip("/")
-    return f"https://{domain}/dp/{asin}"
+    url = f"https://{domain}/dp/{asin}"
+    if merchant_id:
+        url = f"{url}?m={merchant_id}"
+    return url
 
 
 async def resolve_redirect(url: str) -> str:
@@ -244,3 +247,43 @@ async def resolve_redirect(url: str) -> str:
     final = str(response.url)
     logger.info("RESOLVER SUCCESS final_url=%s", final)
     return final
+
+
+async def resolve_asin_from_input(user_input: str) -> str | None:
+    """
+    Extract and normalize canonical 10-char ASIN from plain ASIN or Amazon URL (including redirects).
+    Returns capitalized 10-char ASIN or None if invalid.
+    """
+    if not user_input:
+        return None
+    text = user_input.strip()
+    if not text:
+        return None
+
+    # 1. Direct 10-char ASIN check
+    if len(text) == 10 and re.match(r"^[A-Z0-9]{10}$", text, re.I):
+        return text.upper()
+
+    # 2. Extract ASIN from direct URL
+    asin = extract_asin(text)
+    if asin and len(asin) == 10:
+        return asin.upper()
+
+    # 3. Resolve redirect if http(s) URL (short links, affiliate links)
+    if is_http_url(text):
+        try:
+            final_url = await resolve_redirect(text)
+            asin = extract_asin(final_url)
+            if asin and len(asin) == 10:
+                return asin.upper()
+        except Exception as exc:
+            logger.warning("RESOLVER REDIRECT FAILED input=%s exc=%s", text, exc)
+
+    # 4. Fallback search for any 10-char ASIN token
+    match = re.search(r"\b([A-Z0-9]{10})\b", text, re.I)
+    if match:
+        token = match.group(1).upper()
+        if len(token) == 10:
+            return token
+
+    return None

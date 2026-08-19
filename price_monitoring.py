@@ -15,21 +15,25 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, ContextTypes
 
 from ai_caption import build_product_caption
+from ai_rewriter import rewrite_caption
 from amazon_shortener import shorten_amazon_url
 from config import ADMIN_USER_IDS, AMAZON_DOMAIN
 from coupon_price import coupon_apply_kwargs_from_product, parse_price_number
 from creators_api import (
+    AMAZON_RESALE_SELLER_ID,
+    NEW_AMAZON_SELLER_ID,
     PRICE_DROP_PROFILE,
     CreatorsAPIError,
     _format_egp_price,
     creators_api_configured,
+    extract_seller_offer,
     get_creators_client,
     is_valid_asin,
 )
-from database import Database
+from database import Database, compute_reference_price
 from file_cleanup import cleanup_files
 from inline_buttons import build_inline_keyboard
-from link_resolver import build_clean_url
+from link_resolver import build_clean_url, resolve_asin_from_input
 from product_fetcher import fetch_product, resolve_display_url
 from published_price import (
     drop_index_emoji,
@@ -38,8 +42,10 @@ from published_price import (
     format_detailed_price_drop_message,
     format_resale_price_drop_message,
     format_resale_restock_message,
+    format_resale_smart_restock_message,
     format_restock_message,
     format_savings,
+    format_smart_restock_message,
     generate_price_chart_image,
     short_title,
 )
@@ -58,9 +64,6 @@ CB_PRICE_CHART_VIEW = "ph_chart:"
 
 _MAX_PRODUCTS_PER_MESSAGE = 8
 _TELEGRAM_TEXT_LIMIT = 4000
-
-NEW_AMAZON_SELLER_ID = "A1ZVRGNO5AYLOV"
-AMAZON_RESALE_SELLER_ID = "A2N2MP47XAP1MK"
 
 
 def _db(context: ContextTypes.DEFAULT_TYPE) -> Database:
@@ -133,55 +136,7 @@ def _build_republish_confirm_keyboard(published_id: int) -> InlineKeyboardMarkup
     )
 
 
-def extract_seller_offer(
-    item: Any | None,
-    seller_type: str,
-) -> tuple[str, str | None, float | None, str | None, float | None, str | None]:
-    """
-    Extract seller offer details for seller_type ('NEW_AMAZON' or 'AMAZON_RESALE').
-    Returns tuple: (status, price_text, price_value, list_price_text, list_price_value, seller_name)
-    status: 'AVAILABLE', 'OUT_OF_STOCK', or 'UNKNOWN' (API failure)
-    """
-    if not item:
-        return ("UNKNOWN", None, None, None, None, None)
 
-    target_merchant_id = NEW_AMAZON_SELLER_ID if seller_type == "NEW_AMAZON" else AMAZON_RESALE_SELLER_ID
-    listings = getattr(item, "raw_listings", []) or []
-    merchant_found = False
-    matching_offers = []
-
-    for listing in listings:
-        merchant_info = listing.get("merchantInfo") or {}
-        m_id = merchant_info.get("id") or ""
-        if m_id == target_merchant_id:
-            merchant_found = True
-            price_obj = listing.get("price") or {}
-            price_text = _format_egp_price(price_obj.get("money"))
-            if price_text != "Not found":
-                val = parse_price_number(price_text)
-                if val and val > 0:
-                    basis = price_obj.get("savingBasis") or {}
-                    basis_money = basis.get("money") if isinstance(basis, dict) else None
-                    list_price_text = _format_egp_price(basis_money) if basis_money else None
-                    if list_price_text == "Not found":
-                        list_price_text = None
-                    list_val = parse_price_number(list_price_text) if list_price_text else None
-
-                    seller_name = (merchant_info.get("name") or "").strip() or None
-                    if seller_type == "NEW_AMAZON" and not seller_name:
-                        seller_name = "Amazon.eg"
-
-                    matching_offers.append((val, price_text, list_price_text, list_val, seller_name))
-
-    if not merchant_found:
-        return ("MISSING_MERCHANT", None, None, None, None, None)
-
-    if not matching_offers:
-        return ("OUT_OF_STOCK", None, None, None, None, None)
-
-    matching_offers.sort(key=lambda x: x[0])
-    lowest_offer = matching_offers[0]
-    return ("AVAILABLE", lowest_offer[1], lowest_offer[0], lowest_offer[2], lowest_offer[3], lowest_offer[4])
 
 
 async def _safe_send_message(
@@ -237,12 +192,746 @@ async def price_monitoring_scheduler_loop(application: Any) -> None:
                         await run_price_check(application, admin_chat_id)
                     except Exception:
                         logger.exception("PRICE MONITOR → SCHEDULER RUN FAILED")
-                    db.set_last_price_check_time()
-
             await asyncio.sleep(60)
     except asyncio.CancelledError:
         logger.info("PRICE MONITOR → SCHEDULER STOPPED")
         raise
+
+
+async def evaluate_product_price_check(
+    db: Database,
+    product: dict[str, Any],
+    item: Any | None,
+    bulk_history: dict[tuple[str, str], dict[str, Any]],
+    min_drop: float = 1.0,
+) -> dict[str, Any]:
+    """
+    Core per-product price evaluation logic. Shared identically between
+    automatic monitoring and single-product checks.
+    """
+    asin = product["asin"].upper()
+    api_failed = item is None
+
+    product_check_updates: list[tuple[float, int]] = []
+    seller_state_updates: list[tuple[str, float | None, int, str]] = []
+    history_records: list[dict[str, Any]] = []
+    notifications: list[dict[str, Any]] = []
+    seller_evaluations: dict[str, dict[str, Any]] = {}
+
+    counts = {
+        "baseline_created": 0,
+        "unchanged": 0,
+        "price_drops": 0,
+        "price_increases": 0,
+        "restocks": 0,
+        "out_of_stock_new": 0,
+        "out_of_stock_resale": 0,
+        "missing_merchant_new": 0,
+        "missing_merchant_resale": 0,
+        "unknown_new": 0,
+        "unknown_resale": 0,
+        "ignored_small_changes": 0,
+        "api_failures": 0,
+    }
+
+    if api_failed:
+        counts["api_failures"] += 1
+        counts["unknown_new"] += 1
+        counts["unknown_resale"] += 1
+        logger.info("PRICE MONITOR → SKIP REASON: ASIN=%s reason=api_batch_failed", asin)
+        return {
+            "asin": asin,
+            "api_failed": True,
+            "product_check_updates": [],
+            "seller_state_updates": [],
+            "history_records": [],
+            "notifications": [],
+            "seller_evaluations": {},
+            "counts": counts,
+        }
+
+    seller_configs = [
+        ("NEW_AMAZON", NEW_AMAZON_SELLER_ID),
+        ("AMAZON_RESALE", AMAZON_RESALE_SELLER_ID),
+    ]
+
+    for seller_type, seller_id in seller_configs:
+        status, price_text, price_val, list_text, list_val, seller_name = extract_seller_offer(
+            item, seller_type
+        )
+
+        prefix = "new" if seller_type == "NEW_AMAZON" else "resale"
+        prev_availability = product.get(f"{prefix}_availability") or "AVAILABLE"
+        prev_last_valid = product.get(f"{prefix}_last_valid_price")
+
+        latest_history = bulk_history.get((asin, seller_type))
+        if prev_last_valid is None and latest_history:
+            prev_last_valid = float(latest_history["final_price"])
+
+        logger.info(
+            "PRICE MONITOR → ASIN=%s SELLER=%s AVAILABILITY=%s PREV_AVAILABILITY=%s PREV_LAST_VALID=%s",
+            asin,
+            seller_type,
+            status,
+            prev_availability,
+            prev_last_valid,
+        )
+
+        seller_eval = {
+            "status": status,
+            "price_text": price_text,
+            "price_val": price_val,
+            "curr_final": price_val if price_val else 0.0,
+            "prev_last_valid": prev_last_valid,
+            "prev_availability": prev_availability,
+            "seller_name": seller_name,
+            "change_type": None,
+            "is_baseline": False,
+            "is_restock": False,
+        }
+        seller_evaluations[seller_type] = seller_eval
+
+        if status == "UNKNOWN":
+            if seller_type == "NEW_AMAZON":
+                counts["unknown_new"] += 1
+            else:
+                counts["unknown_resale"] += 1
+            logger.info(
+                "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=unknown_api_response",
+                asin,
+                seller_type,
+            )
+            continue
+
+        if status == "MISSING_MERCHANT":
+            if seller_type == "NEW_AMAZON":
+                counts["missing_merchant_new"] += 1
+            else:
+                counts["missing_merchant_resale"] += 1
+            logger.info(
+                "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=missing_merchant_id prev_availability=%s",
+                asin,
+                seller_type,
+                prev_availability,
+            )
+            if prev_availability != "OUT_OF_STOCK":
+                seller_state_updates.append(("OUT_OF_STOCK", prev_last_valid, product["id"], seller_type))
+                history_records.append(
+                    {
+                        "asin": asin,
+                        "price": None,
+                        "price_value": None,
+                        "final_price": prev_last_valid if prev_last_valid else 0.0,
+                        "tracked_product_id": product["id"],
+                        "availability": "OUT_OF_STOCK",
+                        "change_type": "out_of_stock",
+                        "seller_type": seller_type,
+                        "seller_id": seller_id,
+                    }
+                )
+            continue
+
+        if status == "OUT_OF_STOCK":
+            if seller_type == "NEW_AMAZON":
+                counts["out_of_stock_new"] += 1
+            else:
+                counts["out_of_stock_resale"] += 1
+            logger.info(
+                "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=out_of_stock_offer_unavailable prev_availability=%s",
+                asin,
+                seller_type,
+                prev_availability,
+            )
+            if prev_availability != "OUT_OF_STOCK":
+                stored_ref = product.get("new_reference_price") if seller_type == "NEW_AMAZON" else product.get("resale_reference_price")
+                seller_state_updates.append(("OUT_OF_STOCK", prev_last_valid, stored_ref, product["id"], seller_type))
+                history_records.append(
+                    {
+                        "asin": asin,
+                        "price": None,
+                        "price_value": None,
+                        "final_price": prev_last_valid if prev_last_valid else 0.0,
+                        "tracked_product_id": product["id"],
+                        "availability": "OUT_OF_STOCK",
+                        "change_type": "out_of_stock",
+                        "seller_type": seller_type,
+                        "seller_id": seller_id,
+                    }
+                )
+            continue
+
+        curr_final = price_val if price_val else 0.0
+        product_check_updates.append((curr_final, product["id"]))
+
+        # Calculate robust reference price for this (asin, seller_type)
+        ph_recs = db.get_price_history_records(asin, seller_type=seller_type, limit=100)
+        curr_rec = {"final_price": curr_final, "availability": "AVAILABLE"}
+        calc_ref = compute_reference_price(ph_recs + [curr_rec])
+        stored_ref = product.get("new_reference_price") if seller_type == "NEW_AMAZON" else product.get("resale_reference_price")
+
+        if stored_ref is not None and stored_ref > 0:
+            if calc_ref is not None and calc_ref > 0:
+                ref_price = max(stored_ref, calc_ref)
+            else:
+                ref_price = stored_ref
+        else:
+            ref_price = calc_ref if calc_ref is not None else curr_final
+
+        ref_discount_pct = ((ref_price - curr_final) / ref_price * 100.0) if (ref_price and ref_price > 0) else 0.0
+
+        if not latest_history:
+            seller_eval["is_baseline"] = True
+            seller_eval["change_type"] = "initial"
+            history_records.append(
+                {
+                    "asin": asin,
+                    "price": price_text,
+                    "price_value": curr_final,
+                    "final_price": curr_final,
+                    "tracked_product_id": product["id"],
+                    "list_price": list_text,
+                    "list_price_value": list_val,
+                    "coupon": product.get("coupon"),
+                    "seller_name": seller_name,
+                    "availability": "AVAILABLE",
+                    "change_type": "initial",
+                    "price_source": "creators_api",
+                    "seller_type": seller_type,
+                    "seller_id": seller_id,
+                }
+            )
+            seller_state_updates.append(("AVAILABLE", curr_final, ref_price, product["id"], seller_type))
+            counts["baseline_created"] += 1
+
+            logger.info(
+                "REFERENCE PRICE: asin=%s seller_type=%s reference_price=%.2f current_price=%.2f last_valid_price=None reference_discount_percent=%.2f",
+                asin,
+                seller_type,
+                ref_price,
+                curr_final,
+                ref_discount_pct,
+            )
+
+            if seller_type == "AMAZON_RESALE":
+                stats = db.get_price_history_stats(asin, seller_type=seller_type, current_override_price=curr_final)
+                currency = product.get("published_currency") or "EGP"
+                msg_text = format_resale_restock_message(
+                    title=product["title"],
+                    current_price=curr_final,
+                    previous_price=0.0,
+                    reference_price=ref_price,
+                    currency=currency,
+                    stats=stats,
+                    product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={AMAZON_RESALE_SELLER_ID}",
+                )
+                notifications.append(
+                    {
+                        "published_id": product["id"],
+                        "asin": asin,
+                        "message_text": msg_text,
+                    }
+                )
+                logger.info(
+                    "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=None previous_availability=%s alert_decision=ALERT_QUEUED alert_reason=INITIAL_RESALE_OFFER_AVAILABLE",
+                    asin,
+                    AMAZON_RESALE_SELLER_ID,
+                    curr_final,
+                    prev_availability,
+                )
+            else:
+                logger.info(
+                    "PRICE MONITOR → INITIAL BASELINE RECORD SAVED asin=%s seller_type=%s price=%.2f (no alert)",
+                    asin,
+                    seller_type,
+                    curr_final,
+                )
+            continue
+
+        is_restock = prev_availability == "OUT_OF_STOCK"
+        effective_prev = prev_last_valid if (prev_last_valid and prev_last_valid > 0) else float(latest_history["final_price"])
+        price_diff = curr_final - effective_prev
+        has_price_change = abs(price_diff) >= 0.01
+
+        logger.info(
+            "REFERENCE PRICE: asin=%s seller_type=%s reference_price=%.2f current_price=%.2f last_valid_price=%.2f reference_discount_percent=%.2f",
+            asin,
+            seller_type,
+            ref_price,
+            curr_final,
+            effective_prev,
+            ref_discount_pct,
+        )
+
+        if is_restock:
+            seller_eval["is_restock"] = True
+            seller_eval["change_type"] = "restock"
+            counts["restocks"] += 1
+            seller_state_updates.append(("AVAILABLE", curr_final, ref_price, product["id"], seller_type))
+            history_records.append(
+                {
+                    "asin": asin,
+                    "price": price_text,
+                    "price_value": curr_final,
+                    "final_price": curr_final,
+                    "tracked_product_id": product["id"],
+                    "list_price": list_text,
+                    "list_price_value": list_val,
+                    "coupon": product.get("coupon"),
+                    "seller_name": seller_name,
+                    "availability": "AVAILABLE",
+                    "price_change_amount": price_diff,
+                    "change_type": "restock",
+                    "seller_type": seller_type,
+                    "seller_id": seller_id,
+                }
+            )
+
+            stats = db.get_price_history_stats(asin, seller_type=seller_type, current_override_price=curr_final)
+            currency = product.get("published_currency") or "EGP"
+            deal_threshold_pct = db.get_smart_restock_deal_pct()
+
+            # Priority 1: Price Drop + Restock (curr_final < effective_prev)
+            if curr_final < effective_prev:
+                reason = "price_drop_and_restock"
+                if seller_type == "NEW_AMAZON":
+                    msg_text = format_detailed_price_drop_message(
+                        title=product["title"],
+                        current_price=curr_final,
+                        previous_price=effective_prev,
+                        currency=currency,
+                        stats=stats,
+                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={NEW_AMAZON_SELLER_ID}",
+                        coupon=product.get("coupon"),
+                    )
+                else:
+                    msg_text = format_resale_price_drop_message(
+                        title=product["title"],
+                        current_price=curr_final,
+                        previous_price=effective_prev,
+                        currency=currency,
+                        stats=stats,
+                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={AMAZON_RESALE_SELLER_ID}",
+                    )
+            # Priority 2: Smart Restock Deal (ref_discount_pct >= deal_threshold_pct)
+            elif ref_discount_pct >= deal_threshold_pct and ref_price and ref_price > curr_final:
+                reason = "smart_restock_deal"
+                if seller_type == "NEW_AMAZON":
+                    msg_text = format_smart_restock_message(
+                        title=product["title"],
+                        current_price=curr_final,
+                        reference_price=ref_price,
+                        previous_price=effective_prev,
+                        currency=currency,
+                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={NEW_AMAZON_SELLER_ID}",
+                    )
+                else:
+                    msg_text = format_resale_smart_restock_message(
+                        title=product["title"],
+                        current_price=curr_final,
+                        reference_price=ref_price,
+                        previous_price=effective_prev,
+                        currency=currency,
+                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={AMAZON_RESALE_SELLER_ID}",
+                    )
+            # Priority 3: Normal Restock
+            else:
+                reason = "normal_restock"
+                if seller_type == "NEW_AMAZON":
+                    msg_text = format_restock_message(
+                        title=product["title"],
+                        current_price=curr_final,
+                        previous_price=effective_prev,
+                        reference_price=ref_price,
+                        currency=currency,
+                        stats=stats,
+                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={NEW_AMAZON_SELLER_ID}",
+                    )
+                else:
+                    msg_text = format_resale_restock_message(
+                        title=product["title"],
+                        current_price=curr_final,
+                        previous_price=effective_prev,
+                        reference_price=ref_price,
+                        currency=currency,
+                        stats=stats,
+                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={AMAZON_RESALE_SELLER_ID}",
+                    )
+
+            logger.info(
+                "SMART RESTOCK DECISION: asin=%s seller_type=%s current=%.2f reference=%.2f last_valid=%.2f qualifies=%s reason=%s",
+                asin,
+                seller_type,
+                curr_final,
+                ref_price or 0.0,
+                effective_prev,
+                reason in ("price_drop_and_restock", "smart_restock_deal"),
+                reason,
+            )
+
+            notifications.append(
+                {
+                    "published_id": product["id"],
+                    "asin": asin,
+                    "message_text": msg_text,
+                }
+            )
+            continue
+
+        if not has_price_change:
+            counts["unchanged"] += 1
+            seller_eval["change_type"] = "unchanged"
+            if seller_type == "AMAZON_RESALE":
+                logger.info(
+                    "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=SKIP_ALERT alert_reason=PRICE_UNCHANGED",
+                    asin,
+                    AMAZON_RESALE_SELLER_ID,
+                    curr_final,
+                    effective_prev,
+                    prev_availability,
+                )
+            else:
+                logger.info(
+                    "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=price_unchanged price=%.2f",
+                    asin,
+                    seller_type,
+                    curr_final,
+                )
+            seller_state_updates.append(("AVAILABLE", curr_final, ref_price, product["id"], seller_type))
+            continue
+
+        change_amount = price_diff
+        change_percent = (change_amount / effective_prev * 100.0) if effective_prev > 0 else 0.0
+        change_type = "price_drop" if curr_final < effective_prev else "price_increase"
+        seller_eval["change_type"] = change_type
+
+        if change_type == "price_increase":
+            counts["price_increases"] += 1
+            if seller_type == "AMAZON_RESALE":
+                logger.info(
+                    "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=SKIP_ALERT alert_reason=PRICE_INCREASE",
+                    asin,
+                    AMAZON_RESALE_SELLER_ID,
+                    curr_final,
+                    effective_prev,
+                    prev_availability,
+                )
+            else:
+                logger.info(
+                    "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=price_increase previous=%.2f current=%.2f",
+                    asin,
+                    seller_type,
+                    effective_prev,
+                    curr_final,
+                )
+
+        history_records.append(
+            {
+                "asin": asin,
+                "price": price_text,
+                "price_value": curr_final,
+                "final_price": curr_final,
+                "tracked_product_id": product["id"],
+                "list_price": list_text,
+                "list_price_value": list_val,
+                "coupon": product.get("coupon"),
+                "seller_name": seller_name,
+                "availability": "AVAILABLE",
+                "price_change_amount": change_amount,
+                "price_change_percent": change_percent,
+                "change_type": change_type,
+                "seller_type": seller_type,
+                "seller_id": seller_id,
+            }
+        )
+        seller_state_updates.append(("AVAILABLE", curr_final, ref_price, product["id"], seller_type))
+
+        logger.info(
+            "PRICE MONITOR → HISTORY RECORD SAVED asin=%s seller_type=%s previous=%.2f current=%.2f change=%.2f percent=%.1f%% type=%s",
+            asin,
+            seller_type,
+            effective_prev,
+            curr_final,
+            change_amount,
+            change_percent,
+            change_type,
+        )
+
+        if curr_final < effective_prev:
+            counts["price_drops"] += 1
+            savings = effective_prev - curr_final
+            if savings < min_drop:
+                counts["ignored_small_changes"] += 1
+                if seller_type == "AMAZON_RESALE":
+                    logger.info(
+                        "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=SKIP_ALERT alert_reason=BELOW_MIN_DROP",
+                        asin,
+                        AMAZON_RESALE_SELLER_ID,
+                        curr_final,
+                        effective_prev,
+                        prev_availability,
+                    )
+                else:
+                    logger.info(
+                        "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=below_min_drop savings=%.2f min_drop=%s",
+                        asin,
+                        seller_type,
+                        savings,
+                        min_drop,
+                    )
+                continue
+
+            stats = db.get_price_history_stats(asin, seller_type=seller_type, current_override_price=curr_final)
+            currency = product.get("published_currency") or "EGP"
+
+            if seller_type == "NEW_AMAZON":
+                msg_text = format_detailed_price_drop_message(
+                    title=product["title"],
+                    current_price=curr_final,
+                    previous_price=effective_prev,
+                    currency=currency,
+                    stats=stats,
+                    coupon=product.get("coupon"),
+                    seller=seller_name,
+                    product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={NEW_AMAZON_SELLER_ID}",
+                )
+            else:
+                msg_text = format_resale_price_drop_message(
+                    title=product["title"],
+                    current_price=curr_final,
+                    previous_price=effective_prev,
+                    currency=currency,
+                    stats=stats,
+                    product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={AMAZON_RESALE_SELLER_ID}",
+                )
+                logger.info(
+                    "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=ALERT_QUEUED alert_reason=PRICE_DROP",
+                    asin,
+                    AMAZON_RESALE_SELLER_ID,
+                    curr_final,
+                    effective_prev,
+                    prev_availability,
+                )
+
+            notifications.append(
+                {
+                    "published_id": product["id"],
+                    "asin": asin,
+                    "message_text": msg_text,
+                }
+            )
+
+    return {
+        "asin": asin,
+        "api_failed": False,
+        "product_check_updates": product_check_updates,
+        "seller_state_updates": seller_state_updates,
+        "history_records": history_records,
+        "notifications": notifications,
+        "seller_evaluations": seller_evaluations,
+        "counts": counts,
+    }
+
+
+def _format_single_product_result_card(
+    asin: str,
+    title: str,
+    existing_product: bool,
+    new_eval: dict[str, Any],
+    resale_eval: dict[str, Any],
+    new_stats: dict[str, Any] | None,
+    resale_stats: dict[str, Any] | None,
+    api_failed: bool = False,
+) -> str:
+    lines = [
+        "🔎 <b>Price Check Result</b>\n",
+        f"📦 <b>{html_escape(title)}</b>",
+        f"ASIN: <code>{asin}</code>\n",
+    ]
+
+    if api_failed:
+        lines.append("⚠️ <b>Creators API Status: UNKNOWN</b>\n<i>State preserved without mutating database.</i>\n")
+
+    # NEW Amazon Section
+    new_status = new_eval.get("status", "UNKNOWN")
+    new_price = new_eval.get("curr_final", 0.0)
+    new_seller = new_eval.get("seller_name") or "Amazon.eg"
+    if new_status == "AVAILABLE" and new_price > 0:
+        lines.append("🆕 <b>Amazon:</b>")
+        lines.append(f"💰 <b>{new_price:,.2f} EGP</b>")
+        lines.append(f"🏪 {html_escape(new_seller)}")
+        lines.append("🟢 Available\n")
+    elif new_status == "OUT_OF_STOCK":
+        lines.append("🆕 <b>Amazon:</b> 🔴 Out of Stock\n")
+    elif new_status == "MISSING_MERCHANT":
+        lines.append("🆕 <b>Amazon:</b> ⚠️ Merchant Unavailable\n")
+    else:
+        lines.append("🆕 <b>Amazon:</b> ⚠️ Status Unknown\n")
+
+    # Resale Section
+    resale_status = resale_eval.get("status", "UNKNOWN")
+    resale_price = resale_eval.get("curr_final", 0.0)
+    if resale_status == "AVAILABLE" and resale_price > 0:
+        lines.append("♻️ <b>Amazon Resale:</b>")
+        lines.append(f"💰 <b>{resale_price:,.2f} EGP</b>")
+        lines.append("🏪 Amazon Resale")
+        lines.append("🟢 Available\n")
+    elif resale_status == "OUT_OF_STOCK":
+        lines.append("♻️ <b>Amazon Resale:</b> 🔴 Out of Stock\n")
+    elif resale_status == "MISSING_MERCHANT":
+        lines.append("♻️ <b>Amazon Resale:</b> ⚠️ Merchant Unavailable\n")
+    else:
+        lines.append("♻️ <b>Amazon Resale:</b> ⚠️ Status Unknown\n")
+
+    # History Section
+    hist_lines = []
+    if new_stats and new_stats.get("lowest"):
+        hist_lines.append(
+            f"• NEW Lowest: <b>{new_stats['lowest']:,.2f} EGP</b> | Avg: <b>{new_stats.get('average', 0.0):,.2f} EGP</b>"
+        )
+    if resale_stats and resale_stats.get("lowest"):
+        hist_lines.append(
+            f"• Resale Lowest: <b>{resale_stats['lowest']:,.2f} EGP</b> | Avg: <b>{resale_stats.get('average', 0.0):,.2f} EGP</b>"
+        )
+
+    if hist_lines:
+        lines.append("📊 <b>History:</b>")
+        lines.extend(hist_lines)
+        lines.append("")
+
+    if not existing_product:
+        lines.append("✅ <b>Added to Price Monitoring</b>")
+    else:
+        lines.append("✅ <b>Product already tracked</b>")
+        lines.append("🔄 Existing history preserved")
+        lines.append("✅ Monitoring state updated")
+
+    return "\n".join(lines)
+
+
+async def run_single_product_price_check(db: Database, input_text: str) -> dict[str, Any]:
+    """
+    Check a single product given an ASIN or Amazon URL.
+    Reuses the SAME core evaluation engine as automatic price monitoring.
+    """
+    asin = await resolve_asin_from_input(input_text)
+    if not asin or not is_valid_asin(asin):
+        return {
+            "success": False,
+            "error": "invalid_asin",
+            "message": "❌ Invalid Amazon ASIN",
+        }
+
+    row = db.get_published_product_by_asin(asin)
+    existing_product = row is not None
+
+    logger.info(
+        "PRICE MONITOR → SINGLE CHECK START input=%s asin=%s existing_product=%s",
+        input_text,
+        asin,
+        existing_product,
+    )
+
+    client = get_creators_client()
+    if not client or not creators_api_configured():
+        return {
+            "success": False,
+            "error": "api_not_configured",
+            "message": "❌ Creators API is not configured.",
+        }
+
+    expanded_profile = [
+        "offersV2.listings.price",
+        "offersV2.listings.dealDetails",
+        "offersV2.listings.merchantInfo",
+    ]
+
+    logger.info("PRICE MONITOR → SINGLE CHECK FETCH START asin=%s", asin)
+    fetched_items = await client.get_items([asin], expanded_profile, db=db, profile="price_drop")
+    item = fetched_items.get(asin)
+
+    if not existing_product:
+        logger.info("PRICE MONITOR → SINGLE CHECK NEW PRODUCT asin=%s", asin)
+        title = item.title if (item and item.title and item.title != "Not found") else f"Amazon Product ({asin})"
+        new_price_val = None
+        new_price_txt = None
+        if item and hasattr(item, "offers") and isinstance(item.offers, dict) and "NEW_AMAZON" in item.offers:
+            new_price_val = item.offers["NEW_AMAZON"].get("price_value")
+            new_price_txt = item.offers["NEW_AMAZON"].get("price_text")
+
+        db.add_published_product(
+            asin=asin,
+            title=title,
+            source_channel_id=0,
+            destination_message_id=0,
+            published_price=new_price_txt,
+            published_price_value=new_price_val,
+            published_currency="EGP",
+        )
+        product = db.get_published_product_by_asin(asin)
+    else:
+        logger.info("PRICE MONITOR → SINGLE CHECK DATABASE HIT asin=%s", asin)
+        product = row
+
+    if not product:
+        return {
+            "success": False,
+            "error": "db_error",
+            "message": "❌ Failed to load product from database.",
+        }
+
+    bulk_history = db.get_bulk_latest_price_history([asin])
+    eval_res = await evaluate_product_price_check(db, product, item, bulk_history, min_drop=1.0)
+
+    # Commit DB updates
+    if eval_res["product_check_updates"] or eval_res["seller_state_updates"] or eval_res["history_records"]:
+        db.execute_bulk_monitoring_db_updates(
+            eval_res["product_check_updates"],
+            eval_res["seller_state_updates"],
+            eval_res["history_records"],
+        )
+
+    # Log required diagnostic steps
+    seller_evals = eval_res.get("seller_evaluations", {})
+    for stype, sid in [("NEW_AMAZON", NEW_AMAZON_SELLER_ID), ("AMAZON_RESALE", AMAZON_RESALE_SELLER_ID)]:
+        seval = seller_evals.get(stype, {})
+        status = seval.get("status", "UNKNOWN")
+        curr_price = seval.get("curr_final")
+        logger.info(
+            "PRICE MONITOR → SINGLE CHECK %s merchant_id=%s price=%s availability=%s",
+            stype,
+            sid,
+            curr_price,
+            status,
+        )
+        if seval.get("is_baseline"):
+            logger.info("PRICE MONITOR → SINGLE CHECK BASELINE CREATED seller_type=%s", stype)
+
+    logger.info("PRICE MONITOR → SINGLE CHECK COMPLETE asin=%s added_to_monitoring=True", asin)
+
+    new_eval = seller_evals.get("NEW_AMAZON", {})
+    resale_eval = seller_evals.get("AMAZON_RESALE", {})
+
+    new_stats = db.get_price_history_stats(asin, seller_type="NEW_AMAZON")
+    resale_stats = db.get_price_history_stats(asin, seller_type="AMAZON_RESALE")
+
+    card_text = _format_single_product_result_card(
+        asin=asin,
+        title=product["title"],
+        existing_product=existing_product,
+        new_eval=new_eval,
+        resale_eval=resale_eval,
+        new_stats=new_stats,
+        resale_stats=resale_stats,
+        api_failed=eval_res["api_failed"],
+    )
+
+    return {
+        "success": True,
+        "asin": asin,
+        "existing_product": existing_product,
+        "message": card_text,
+        "eval_res": eval_res,
+    }
 
 
 async def run_price_check(application: Any, admin_chat_id: int | str | None = None) -> None:
@@ -254,6 +943,8 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
 
     t_total_start = time.monotonic()
 
+    logger.info("PRICE MONITOR → EVENT LOOP TEST START")
+
     # Stage 1: Fetch active tracked products
     t_stage1_start = time.monotonic()
     products = db.list_unique_published_products()
@@ -261,6 +952,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
     t_fetch_products = t_stage1_end - t_stage1_start
 
     total = len(products)
+    logger.info("PRICE MONITOR → CYCLE START total_products=%s min_drop=%s", total, min_drop)
     logger.info("PRICE MONITOR → AUTOMATIC CHECK START total_products=%s min_drop=%s", total, min_drop)
 
     if not products:
@@ -462,390 +1154,27 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         logger.info("PRICE MONITOR → ASIN=%s", asin)
 
         item = fetched_items.get(asin)
-        api_failed = item is None
+        eval_res = await evaluate_product_price_check(db, product, item, bulk_history, min_drop)
 
-        if api_failed:
-            api_failures += 1
-            unknown_new += 1
-            unknown_resale += 1
-            logger.info("PRICE MONITOR → SKIP REASON: ASIN=%s reason=api_batch_failed", asin)
-            continue
+        product_check_updates.extend(eval_res["product_check_updates"])
+        seller_state_updates.extend(eval_res["seller_state_updates"])
+        history_records.extend(eval_res["history_records"])
+        notifications.extend(eval_res["notifications"])
 
-        seller_configs = [
-            ("NEW_AMAZON", NEW_AMAZON_SELLER_ID),
-            ("AMAZON_RESALE", AMAZON_RESALE_SELLER_ID),
-        ]
-
-        for seller_type, seller_id in seller_configs:
-            logger.info("PRICE MONITOR → ASIN=%s SELLER_TYPE=%s SELLER_ID=%s", asin, seller_type, seller_id)
-
-            tp0 = time.monotonic()
-            status, price_text, price_val, list_text, list_val, seller_name = extract_seller_offer(
-                item, seller_type
-            )
-            tp1 = time.monotonic()
-            t_parse_items += (tp1 - tp0)
-
-            prefix = "new" if seller_type == "NEW_AMAZON" else "resale"
-            prev_availability = product.get(f"{prefix}_availability") or "AVAILABLE"
-            prev_last_valid = product.get(f"{prefix}_last_valid_price")
-
-            # Bulk in-memory lookup
-            latest_history = bulk_history.get((asin, seller_type))
-
-            if prev_last_valid is None and latest_history:
-                prev_last_valid = float(latest_history["final_price"])
-
-            logger.info(
-                "PRICE MONITOR → ASIN=%s SELLER=%s AVAILABILITY=%s PREV_AVAILABILITY=%s PREV_LAST_VALID=%s",
-                asin,
-                seller_type,
-                status,
-                prev_availability,
-                prev_last_valid,
-            )
-
-            if status == "UNKNOWN":
-                if seller_type == "NEW_AMAZON":
-                    unknown_new += 1
-                else:
-                    unknown_resale += 1
-                logger.info(
-                    "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=unknown_api_response",
-                    asin,
-                    seller_type,
-                )
-                continue
-
-            if status == "MISSING_MERCHANT":
-                if seller_type == "NEW_AMAZON":
-                    missing_merchant_new += 1
-                else:
-                    missing_merchant_resale += 1
-                logger.info(
-                    "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=missing_merchant_id prev_availability=%s",
-                    asin,
-                    seller_type,
-                    prev_availability,
-                )
-                if prev_availability != "OUT_OF_STOCK":
-                    seller_state_updates.append(("OUT_OF_STOCK", prev_last_valid, product["id"], seller_type))
-                    history_records.append(
-                        {
-                            "asin": asin,
-                            "price": None,
-                            "price_value": None,
-                            "final_price": prev_last_valid if prev_last_valid else 0.0,
-                            "tracked_product_id": product["id"],
-                            "availability": "OUT_OF_STOCK",
-                            "change_type": "out_of_stock",
-                            "seller_type": seller_type,
-                            "seller_id": seller_id,
-                        }
-                    )
-                continue
-
-            if status == "OUT_OF_STOCK":
-                if seller_type == "NEW_AMAZON":
-                    out_of_stock_new += 1
-                else:
-                    out_of_stock_resale += 1
-                logger.info(
-                    "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=out_of_stock_offer_unavailable prev_availability=%s",
-                    asin,
-                    seller_type,
-                    prev_availability,
-                )
-                if prev_availability != "OUT_OF_STOCK":
-                    seller_state_updates.append(("OUT_OF_STOCK", prev_last_valid, product["id"], seller_type))
-                    history_records.append(
-                        {
-                            "asin": asin,
-                            "price": None,
-                            "price_value": None,
-                            "final_price": prev_last_valid if prev_last_valid else 0.0,
-                            "tracked_product_id": product["id"],
-                            "availability": "OUT_OF_STOCK",
-                            "change_type": "out_of_stock",
-                            "seller_type": seller_type,
-                            "seller_id": seller_id,
-                        }
-                    )
-                continue
-
-            curr_final = price_val if price_val else 0.0
-            product_check_updates.append((curr_final, product["id"]))
-
-            if not latest_history:
-                history_records.append(
-                    {
-                        "asin": asin,
-                        "price": price_text,
-                        "price_value": curr_final,
-                        "final_price": curr_final,
-                        "tracked_product_id": product["id"],
-                        "list_price": list_text,
-                        "list_price_value": list_val,
-                        "coupon": product.get("coupon"),
-                        "seller_name": seller_name,
-                        "availability": "AVAILABLE",
-                        "change_type": "initial",
-                        "price_source": "creators_api",
-                        "seller_type": seller_type,
-                        "seller_id": seller_id,
-                    }
-                )
-                seller_state_updates.append(("AVAILABLE", curr_final, product["id"], seller_type))
-                baseline_created_count += 1
-
-                if seller_type == "AMAZON_RESALE":
-                    stats = db.get_price_history_stats(asin, seller_type=seller_type, current_override_price=curr_final)
-                    currency = product.get("published_currency") or "EGP"
-                    msg_text = format_resale_restock_message(
-                        title=product["title"],
-                        current_price=curr_final,
-                        previous_price=0.0,
-                        currency=currency,
-                        stats=stats,
-                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={AMAZON_RESALE_SELLER_ID}",
-                    )
-                    notifications.append(
-                        {
-                            "published_id": product["id"],
-                            "asin": asin,
-                            "message_text": msg_text,
-                        }
-                    )
-                    logger.info(
-                        "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=None previous_availability=%s alert_decision=ALERT_QUEUED alert_reason=INITIAL_RESALE_OFFER_AVAILABLE",
-                        asin,
-                        AMAZON_RESALE_SELLER_ID,
-                        curr_final,
-                        prev_availability,
-                    )
-                else:
-                    logger.info(
-                        "PRICE MONITOR → INITIAL BASELINE RECORD SAVED asin=%s seller_type=%s price=%.2f (no alert)",
-                        asin,
-                        seller_type,
-                        curr_final,
-                    )
-                continue
-
-            is_restock = prev_availability == "OUT_OF_STOCK"
-            effective_prev = prev_last_valid if (prev_last_valid and prev_last_valid > 0) else float(latest_history["final_price"])
-
-            price_diff = curr_final - effective_prev
-            has_price_change = abs(price_diff) >= 0.01
-
-            if is_restock:
-                restocks_count += 1
-                seller_state_updates.append(("AVAILABLE", curr_final, product["id"], seller_type))
-                history_records.append(
-                    {
-                        "asin": asin,
-                        "price": price_text,
-                        "price_value": curr_final,
-                        "final_price": curr_final,
-                        "tracked_product_id": product["id"],
-                        "list_price": list_text,
-                        "list_price_value": list_val,
-                        "coupon": product.get("coupon"),
-                        "seller_name": seller_name,
-                        "availability": "AVAILABLE",
-                        "price_change_amount": price_diff,
-                        "change_type": "restock",
-                        "seller_type": seller_type,
-                        "seller_id": seller_id,
-                    }
-                )
-
-                stats = db.get_price_history_stats(asin, seller_type=seller_type, current_override_price=curr_final)
-                currency = product.get("published_currency") or "EGP"
-
-                tc0 = time.monotonic()
-                if seller_type == "NEW_AMAZON":
-                    msg_text = format_restock_message(
-                        title=product["title"],
-                        current_price=curr_final,
-                        previous_price=effective_prev,
-                        currency=currency,
-                        stats=stats,
-                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={NEW_AMAZON_SELLER_ID}",
-                    )
-                    logger.info("PRICE MONITOR → RESTOCK NOTIFICATION QUEUED asin=%s seller_type=%s", asin, seller_type)
-                else:
-                    msg_text = format_resale_restock_message(
-                        title=product["title"],
-                        current_price=curr_final,
-                        previous_price=effective_prev,
-                        currency=currency,
-                        stats=stats,
-                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={AMAZON_RESALE_SELLER_ID}",
-                    )
-                    logger.info(
-                        "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=ALERT_QUEUED alert_reason=RESALE_RESTOCK",
-                        asin,
-                        AMAZON_RESALE_SELLER_ID,
-                        curr_final,
-                        effective_prev,
-                        prev_availability,
-                    )
-                tc1 = time.monotonic()
-                t_drop_calc += (tc1 - tc0)
-
-                notifications.append(
-                    {
-                        "published_id": product["id"],
-                        "asin": asin,
-                        "message_text": msg_text,
-                    }
-                )
-                continue
-
-            if not has_price_change:
-                unchanged_count += 1
-                if seller_type == "AMAZON_RESALE":
-                    logger.info(
-                        "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=SKIP_ALERT alert_reason=PRICE_UNCHANGED",
-                        asin,
-                        AMAZON_RESALE_SELLER_ID,
-                        curr_final,
-                        effective_prev,
-                        prev_availability,
-                    )
-                else:
-                    logger.info(
-                        "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=price_unchanged price=%.2f",
-                        asin,
-                        seller_type,
-                        curr_final,
-                    )
-                seller_state_updates.append(("AVAILABLE", curr_final, product["id"], seller_type))
-                continue
-
-            change_amount = price_diff
-            change_percent = (change_amount / effective_prev * 100.0) if effective_prev > 0 else 0.0
-            change_type = "price_drop" if curr_final < effective_prev else "price_increase"
-
-            if change_type == "price_increase":
-                price_increases_count += 1
-                if seller_type == "AMAZON_RESALE":
-                    logger.info(
-                        "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=SKIP_ALERT alert_reason=PRICE_INCREASE",
-                        asin,
-                        AMAZON_RESALE_SELLER_ID,
-                        curr_final,
-                        effective_prev,
-                        prev_availability,
-                    )
-                else:
-                    logger.info(
-                        "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=price_increase previous=%.2f current=%.2f",
-                        asin,
-                        seller_type,
-                        effective_prev,
-                        curr_final,
-                    )
-
-            history_records.append(
-                {
-                    "asin": asin,
-                    "price": price_text,
-                    "price_value": curr_final,
-                    "final_price": curr_final,
-                    "tracked_product_id": product["id"],
-                    "list_price": list_text,
-                    "list_price_value": list_val,
-                    "coupon": product.get("coupon"),
-                    "seller_name": seller_name,
-                    "availability": "AVAILABLE",
-                    "price_change_amount": change_amount,
-                    "price_change_percent": change_percent,
-                    "change_type": change_type,
-                    "seller_type": seller_type,
-                    "seller_id": seller_id,
-                }
-            )
-            seller_state_updates.append(("AVAILABLE", curr_final, product["id"], seller_type))
-
-            logger.info(
-                "PRICE MONITOR → HISTORY RECORD SAVED asin=%s seller_type=%s previous=%.2f current=%.2f change=%.2f percent=%.1f%% type=%s",
-                asin,
-                seller_type,
-                effective_prev,
-                curr_final,
-                change_amount,
-                change_percent,
-                change_type,
-            )
-
-            if curr_final < effective_prev:
-                price_drops_count += 1
-                savings = effective_prev - curr_final
-                if savings < min_drop:
-                    ignored_small_changes += 1
-                    if seller_type == "AMAZON_RESALE":
-                        logger.info(
-                            "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=SKIP_ALERT alert_reason=BELOW_MIN_DROP",
-                            asin,
-                            AMAZON_RESALE_SELLER_ID,
-                            curr_final,
-                            effective_prev,
-                            prev_availability,
-                        )
-                    else:
-                        logger.info(
-                            "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=below_min_drop savings=%.2f min_drop=%s",
-                            asin,
-                            seller_type,
-                            savings,
-                            min_drop,
-                        )
-                    continue
-
-                stats = db.get_price_history_stats(asin, seller_type=seller_type, current_override_price=curr_final)
-                currency = product.get("published_currency") or "EGP"
-
-                tc0 = time.monotonic()
-                if seller_type == "NEW_AMAZON":
-                    msg_text = format_detailed_price_drop_message(
-                        title=product["title"],
-                        current_price=curr_final,
-                        previous_price=effective_prev,
-                        currency=currency,
-                        stats=stats,
-                        coupon=product.get("coupon"),
-                        seller=seller_name,
-                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={NEW_AMAZON_SELLER_ID}",
-                    )
-                else:
-                    msg_text = format_resale_price_drop_message(
-                        title=product["title"],
-                        current_price=curr_final,
-                        previous_price=effective_prev,
-                        currency=currency,
-                        stats=stats,
-                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={AMAZON_RESALE_SELLER_ID}",
-                    )
-                    logger.info(
-                        "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=ALERT_QUEUED alert_reason=PRICE_DROP",
-                        asin,
-                        AMAZON_RESALE_SELLER_ID,
-                        curr_final,
-                        effective_prev,
-                        prev_availability,
-                    )
-                tc1 = time.monotonic()
-                t_drop_calc += (tc1 - tc0)
-
-                notifications.append(
-                    {
-                        "published_id": product["id"],
-                        "asin": asin,
-                        "message_text": msg_text,
-                    }
-                )
+        c = eval_res["counts"]
+        baseline_created_count += c["baseline_created"]
+        unchanged_count += c["unchanged"]
+        price_drops_count += c["price_drops"]
+        price_increases_count += c["price_increases"]
+        restocks_count += c["restocks"]
+        out_of_stock_new += c["out_of_stock_new"]
+        out_of_stock_resale += c["out_of_stock_resale"]
+        missing_merchant_new += c["missing_merchant_new"]
+        missing_merchant_resale += c["missing_merchant_resale"]
+        unknown_new += c["unknown_new"]
+        unknown_resale += c["unknown_resale"]
+        ignored_small_changes += c["ignored_small_changes"]
+        api_failures += c["api_failures"]
 
     # Stage 6: Atomic Bulk Database Updates
     t_stage6_start = time.monotonic()
@@ -996,9 +1325,12 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         t_total,
     )
 
+    logger.info("PRICE MONITOR → CYCLE END duration=%.3fs", t_total)
+    logger.info("PRICE MONITOR → EVENT LOOP TEST END")
+
 
 async def republish_published_product(application: Any, published_id: int) -> str:
-    """Re-fetch product data and publish again."""
+    """Re-fetch product data and publish again, preserving requested seller_type strictly."""
     db: Database = application.bot_data["db"]
     browser = application.bot_data.get("browser")
     destination_id = application.bot_data.get("destination_channel_id")
@@ -1010,7 +1342,15 @@ async def republish_published_product(application: Any, published_id: int) -> st
         raise RuntimeError("Published product not found")
 
     asin = row["asin"]
-    clean_url = build_clean_url(asin, AMAZON_DOMAIN)
+    seller_type = row.get("seller_type") or "NEW_AMAZON"
+    merchant_id = AMAZON_RESALE_SELLER_ID if seller_type == "AMAZON_RESALE" else NEW_AMAZON_SELLER_ID
+
+    if seller_type == "AMAZON_RESALE":
+        logger.info("RESALE REPUBLISH START published_id=%s asin=%s merchant_id=%s", published_id, asin, merchant_id)
+    else:
+        logger.info("NEW REPUBLISH START published_id=%s asin=%s merchant_id=%s", published_id, asin, merchant_id)
+
+    clean_url = build_clean_url(asin, AMAZON_DOMAIN, merchant_id=merchant_id if seller_type == "AMAZON_RESALE" else None)
     scrape_key = f"republish_{published_id}_{asin}"
     coupon_enabled = db.get_coupon_detection_enabled()
 
@@ -1023,8 +1363,25 @@ async def republish_published_product(application: Any, published_id: int) -> st
             clean_url,
             scrape_key,
             coupon_enabled=coupon_enabled,
+            seller_type=seller_type,
         )
+
+        # STRICT SAFETY RULE: Do NOT fallback across seller types
+        if product.get("seller_offer_available") is False or product.get("price") == "Not found":
+            if seller_type == "AMAZON_RESALE":
+                logger.warning("RESALE OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin)
+                return "❌ Amazon Resale is currently unavailable"
+            else:
+                logger.warning("NEW OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin)
+                return "❌ NEW Amazon offer is currently unavailable"
+
+        if seller_type == "AMAZON_RESALE":
+            logger.info("RESALE OFFER FOUND merchant_id=%s price=%s availability=AVAILABLE", merchant_id, product["price"])
+
         display_url = resolve_display_url(product, clean_url)
+        if seller_type == "AMAZON_RESALE":
+            logger.info("RESALE PUBLISH URL display_url=%s", display_url)
+
         short_url = await shorten_amazon_url(display_url, db)
         if short_url:
             display_url = short_url
@@ -1052,6 +1409,32 @@ async def republish_published_product(application: Any, published_id: int) -> st
                 coupon=coupon,
                 product=product,
             )
+
+        # Apply AI rewrite if single product (skip for composite multi-product posts)
+        asin_list = [a.strip() for a in asin.split(",") if a.strip()]
+        is_composite = len(asin_list) > 1
+        apply_ai_rewrite = not is_composite
+        reason = "single validated product" if not is_composite else f"{len(asin_list)} validated products"
+
+        logger.info(
+            "REPUBLISH → AI REWRITE DECISION\n"
+            "  published_id=%s\n"
+            "  asin=%s\n"
+            "  seller_type=%s\n"
+            "  product_count=%s\n"
+            "  should_rewrite=%s\n"
+            "  reason=%s",
+            published_id,
+            asin,
+            seller_type,
+            len(asin_list),
+            apply_ai_rewrite,
+            reason,
+        )
+
+        if apply_ai_rewrite:
+            logger.info("REPUBLISH → CALLING AI REWRITE FUNCTION")
+            caption = rewrite_caption(caption, db, log_prefix="REPUBLISH")
 
         upload_image = to_jpeg_for_telegram(product["screenshot"])
         if upload_image != product["screenshot"]:
@@ -1106,15 +1489,14 @@ async def republish_published_product(application: Any, published_id: int) -> st
                     published_list_price=price_fields["published_list_price"],
                     published_list_price_value=price_fields["published_list_price_value"],
                     published_currency=price_fields["published_currency"],
+                    seller_type=seller_type,
                 )
                 db.update_published_product_price_check(published_id, numeric_price)
 
-                logger.info(
-                    "PRICE REPUBLISH success published_id=%s asin=%s message_id=%s",
-                    published_id,
-                    asin,
-                    publish_result.message_id,
-                )
+                if seller_type == "AMAZON_RESALE":
+                    logger.info("RESALE PUBLISH SUCCESS published_id=%s asin=%s message_id=%s", published_id, asin, publish_result.message_id)
+                else:
+                    logger.info("PRICE REPUBLISH success published_id=%s asin=%s message_id=%s", published_id, asin, publish_result.message_id)
 
         return f"✅ Republished ASIN <code>{asin}</code> to {result.successful}/{result.total} destination(s)"
     finally:
@@ -1245,6 +1627,7 @@ async def handle_price_history_view(
 
     asin = (query.data or "").replace(CB_PRICE_HISTORY_VIEW, "").strip().upper()
     db = _db(context)
+    product = db.get_published_product_by_asin(asin)
     stats = db.get_price_history_stats(asin, seller_type="NEW_AMAZON")
 
     if not stats.get("has_data"):
@@ -1255,16 +1638,34 @@ async def handle_price_history_view(
         return
 
     records = db.get_price_history_records(asin, seller_type="NEW_AMAZON", limit=10)
+    ref_new = product.get("new_reference_price") if product else None
+    ref_resale = product.get("resale_reference_price") if product else None
+
+    curr_new = stats.get("current_price") or 0.0
+    ref_disc_new = ((ref_new - curr_new) / ref_new * 100.0) if (ref_new and ref_new > 0 and curr_new > 0) else 0.0
 
     lines = [
         f"📊 <b>Price History — {asin}</b>\n",
-        f"💰 <b>Current Price:</b> {format_currency_amount(stats['current_price'])}",
+        f"💰 <b>Current Price (NEW):</b> {format_currency_amount(curr_new)}",
+        f"📊 <b>Reference Price (NEW):</b> {format_currency_amount(ref_new) if ref_new else 'N/A'}",
+        f"🔥 <b>Reference Discount (NEW):</b> {ref_disc_new:.1f}%",
+        f"📉 <b>Last Valid Price (NEW):</b> {format_currency_amount(product.get('new_last_valid_price') or curr_new) if product else 'N/A'}",
         f"🏆 <b>Lowest Price:</b> {format_currency_amount(stats['lowest_price'])}",
         f"📈 <b>Highest Price:</b> {format_currency_amount(stats['highest_price'])}",
-        f"📊 <b>Average Price:</b> {format_currency_amount(stats['average_price'])}",
-        f"🔄 <b>Total Changes:</b> {stats['total_changes']}\n",
-        "<b>Recent Timeline (NEW Amazon):</b>",
+        f"📊 <b>Average Price:</b> {format_currency_amount(stats['average_price'])}\n",
     ]
+
+    if ref_resale:
+        curr_resale = product.get("resale_last_valid_price") or 0.0
+        ref_disc_resale = ((ref_resale - curr_resale) / ref_resale * 100.0) if (ref_resale > 0 and curr_resale > 0) else 0.0
+        lines.extend([
+            "<b>Amazon Resale:</b>",
+            f"💰 <b>Last Valid Price (Resale):</b> {format_currency_amount(curr_resale)}",
+            f"📊 <b>Reference Price (Resale):</b> {format_currency_amount(ref_resale)}",
+            f"🔥 <b>Reference Discount (Resale):</b> {ref_disc_resale:.1f}%\n",
+        ])
+
+    lines.append("<b>Recent Timeline (NEW Amazon):</b>")
 
     for r in records:
         raw_dt = r.get("recorded_at") or ""

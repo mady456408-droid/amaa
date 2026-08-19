@@ -658,6 +658,7 @@ async def handle_publish_draft(
                 image_path=draft["image_path"],
                 coupon=draft.get("coupon"),
                 list_price=draft.get("list_price"),
+                seller_type=draft.get("seller_type", "NEW_AMAZON"),
             )
             await send_approval_request(
                 context.application.bot,
@@ -770,6 +771,7 @@ async def handle_publish_draft(
                         draft["created_by"],
                         publish_result.message_id,
                         destination_id=publish_result.destination_id,
+                        seller_type=draft.get("seller_type", "NEW_AMAZON"),
                         **price_fields,
                     )
         if not db.set_draft_status(draft_id, "published"):

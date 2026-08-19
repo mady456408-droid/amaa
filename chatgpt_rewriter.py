@@ -34,6 +34,7 @@ REQUIREMENTS:
 - Do not invent or add information not in the original caption
 - Do not remove important product details
 - Keep the caption under 1000 characters
+- Preserve Amazon Resale / Used product status (do not convert Resale to NEW)
 """
 
 

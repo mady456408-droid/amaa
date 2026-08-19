@@ -45,6 +45,7 @@ from conversation_states import (
     AWAIT_DESTINATION_CHAT_ID,
     AWAIT_GEMINI_SYSTEM_PROMPT,
     AWAIT_CHATGPT_REWRITE_PROMPT,
+    AWAIT_SINGLE_PRODUCT_CHECK,
 )
 from telethon_auth import (
     AUTH_STATE_CODE,
@@ -56,7 +57,7 @@ from telethon_auth import (
     submit_code,
     submit_password,
 )
-from price_monitoring import run_price_check
+from price_monitoring import run_price_check, run_single_product_price_check
 from affiliate_tag import apply_affiliate_tag, is_valid_affiliate_tag, set_affiliate_settings
 from manual_posts import (
     UD_EDITING_DRAFT,
@@ -129,6 +130,7 @@ CB_MAX_PRODUCT_4 = "adm:inline_buttons:max_prod:4"
 CB_MAX_PRODUCT_5 = "adm:inline_buttons:max_prod:5"
 CB_PRICE_MONITOR = "adm:price_monitor"
 CB_PRICE_CHECK = "adm:price:check"
+CB_SINGLE_PRICE_CHECK = "adm:price:single"
 CB_MIN_PRICE_DROP = "adm:price:min_drop:"
 CB_MIN_PRICE_DROP_SET = "adm:price:min_drop:set"
 CB_MIN_PRICE_DROP_1 = f"{CB_MIN_PRICE_DROP}1"
@@ -312,6 +314,9 @@ def _price_monitor_keyboard(db: Database) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("🔄 Check Now", callback_data=CB_PRICE_CHECK),
                 toggle_btn,
+            ],
+            [
+                InlineKeyboardButton("🔎 Check Single Product", callback_data=CB_SINGLE_PRICE_CHECK),
             ],
             [
                 InlineKeyboardButton("⏱ Change Interval", callback_data="adm:price:interval_menu"),
@@ -1569,6 +1574,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return ConversationHandler.END
 
+    if data == CB_SINGLE_PRICE_CHECK:
+        await _safe_edit_message_text(
+            query,
+            "🔎 <b>Check Single Product</b>\n\n"
+            "Send Amazon ASIN or product URL:\n\n"
+            "Examples:\n"
+            "• <code>B0FMR7H8FT</code>\n"
+            "• <code>https://www.amazon.eg/dp/B0FMR7H8FT</code>\n\n"
+            "/cancel to abort.",
+            parse_mode="HTML",
+        )
+        return AWAIT_SINGLE_PRODUCT_CHECK
+
     if data == "adm:price:auto_on":
         db.set_auto_price_monitor_enabled(True)
         await _safe_edit_message_text(
@@ -2727,6 +2745,35 @@ async def receive_restore_upload(
         return AWAIT_RESTORE_UPLOAD
 
 
+async def receive_single_product_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user = update.effective_user
+    if not is_admin(user.id if user else None):
+        await _deny(update)
+        return ConversationHandler.END
+
+    text = (update.message.text or "").strip()
+    if text == "/cancel":
+        await update.message.reply_text("❌ Single product check cancelled.")
+        return ConversationHandler.END
+
+    db = _db(context)
+    wait_msg = await update.message.reply_text("🔎 Checking product, please wait...")
+
+    result = await run_single_product_price_check(db, text)
+
+    try:
+        await wait_msg.delete()
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        result["message"],
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    return ConversationHandler.END
+
+
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop(UD_MANUAL_MODE, None)
     context.user_data.pop(UD_EDITING_DRAFT, None)
@@ -2835,6 +2882,12 @@ def build_admin_handlers() -> list:
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND & admin_filter,
                     receive_chatgpt_setting,
+                ),
+            ],
+            AWAIT_SINGLE_PRODUCT_CHECK: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & admin_filter,
+                    receive_single_product_check,
                 ),
             ],
             **manual_states,

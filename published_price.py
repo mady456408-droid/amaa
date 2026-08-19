@@ -214,11 +214,85 @@ def generate_price_chart_image(
         return None
 
 
+def format_smart_restock_message(
+    *,
+    title: str,
+    current_price: float,
+    reference_price: float,
+    previous_price: float | None = None,
+    currency: str = "EGP",
+    product_url: str | None = None,
+) -> str:
+    ref_discount = reference_price - current_price
+    ref_pct = (ref_discount / reference_price * 100.0) if reference_price > 0 else 0.0
+
+    curr_fmt = format_currency_amount(current_price, currency)
+    ref_fmt = format_currency_amount(reference_price, currency)
+
+    lines = [
+        "♻️ <b>رجع متاح بسعر ممتاز!</b>\n",
+        f"📦 <b>{short_title(title, 80)}</b>\n",
+        f"💰 <b>السعر الحالي:</b> {curr_fmt}",
+        f"📊 <b>السعر المرجعي:</b> {ref_fmt}",
+        f"🔥 <b>أقل من السعر المرجعي بـ</b> {ref_pct:.1f}%",
+    ]
+
+    if previous_price is not None and previous_price > 0:
+        prev_fmt = format_currency_amount(previous_price, currency)
+        lines.append(f"📉 <b>آخر سعر قبل النفاد:</b> {prev_fmt}\n")
+        lines.append("💡 السعر الحالي أعلى من آخر سعر، لكنه ما زال أقل بكثير من السعر المرجعي.")
+    else:
+        lines.append("")
+
+    if product_url:
+        lines.extend(["\n🔗 <b>شوف العرض:</b>", product_url])
+
+    return "\n".join(lines)
+
+
+def format_resale_smart_restock_message(
+    *,
+    title: str,
+    current_price: float,
+    reference_price: float,
+    previous_price: float | None = None,
+    currency: str = "EGP",
+    product_url: str | None = None,
+) -> str:
+    ref_discount = reference_price - current_price
+    ref_pct = (ref_discount / reference_price * 100.0) if reference_price > 0 else 0.0
+
+    curr_fmt = format_currency_amount(current_price, currency)
+    ref_fmt = format_currency_amount(reference_price, currency)
+
+    lines = [
+        "♻️ <b>Amazon Resale — رجع متاح بسعر ممتاز!</b>\n",
+        f"📦 <b>{short_title(title, 80)}</b>\n",
+        f"💰 <b>سعر Resale الحالي:</b> {curr_fmt}",
+        f"📊 <b>السعر المرجعي لـ Resale:</b> {ref_fmt}",
+        f"🔥 <b>أقل من المرجع بـ</b> {ref_pct:.1f}%",
+        "📦 <b>الحالة:</b> Used / Amazon Resale",
+    ]
+
+    if previous_price is not None and previous_price > 0:
+        prev_fmt = format_currency_amount(previous_price, currency)
+        lines.append(f"📉 <b>آخر سعر:</b> {prev_fmt}\n")
+        lines.append("💡 السعر الحالي أعلى من آخر سعر، لكنه ما زال أقل بكثير من السعر المرجعي.")
+    else:
+        lines.append("")
+
+    if product_url:
+        lines.extend(["\n🔗 <b>شوف العرض:</b>", product_url])
+
+    return "\n".join(lines)
+
+
 def format_restock_message(
     *,
     title: str,
     current_price: float,
     previous_price: float,
+    reference_price: float | None = None,
     currency: str = "EGP",
     stats: dict[str, Any] | None = None,
     product_url: str | None = None,
@@ -234,8 +308,15 @@ def format_restock_message(
         "🔄 <b>المنتج رجع متاح!</b>\n",
         f"📦 <b>{short_title(title, 80)}</b>\n",
         f"💰 <b>السعر الحالي:</b> {curr_fmt}",
-        f"📉 <b>آخر سعر قبل نفاد المخزون:</b> {prev_fmt}",
     ]
+    if reference_price is not None and reference_price > 0:
+        ref_fmt = format_currency_amount(reference_price, currency)
+        ref_pct = ((reference_price - current_price) / reference_price * 100.0)
+        lines.append(f"📊 <b>السعر المرجعي:</b> {ref_fmt}")
+        lines.append(f"📉 <b>أقل من المرجع بـ</b> {ref_pct:.1f}%")
+
+    if previous_price > 0:
+        lines.append(f"📉 <b>آخر سعر قبل نفاد المخزون:</b> {prev_fmt}")
 
     if savings > 0:
         lines.extend([
@@ -317,11 +398,23 @@ def format_resale_restock_message(
     title: str,
     current_price: float,
     previous_price: float,
+    reference_price: float | None = None,
     currency: str = "EGP",
     stats: dict[str, Any] | None = None,
     product_url: str | None = None,
 ) -> str:
     curr_fmt = format_currency_amount(current_price, currency)
+
+    lines = [
+        "♻️ <b>Amazon Resale رجع!</b>\n",
+        f"📦 <b>{short_title(title, 80)}</b>\n",
+        f"💰 <b>السعر الحالي:</b> {curr_fmt}",
+    ]
+    if reference_price is not None and reference_price > 0:
+        ref_fmt = format_currency_amount(reference_price, currency)
+        ref_pct = ((reference_price - current_price) / reference_price * 100.0)
+        lines.append(f"📊 <b>السعر المرجعي لـ Resale:</b> {ref_fmt}")
+        lines.append(f"📉 <b>أقل من المرجع بـ</b> {ref_pct:.1f}%")
 
     if previous_price > 0:
         savings = previous_price - current_price
@@ -329,12 +422,7 @@ def format_resale_restock_message(
         prev_fmt = format_currency_amount(previous_price, currency)
         savings_fmt = format_currency_amount(savings, currency)
 
-        lines = [
-            "♻️ <b>Amazon Resale رجع!</b>\n",
-            f"📦 <b>{short_title(title, 80)}</b>\n",
-            f"💰 <b>السعر الحالي:</b> {curr_fmt}",
-            f"📉 <b>آخر سعر:</b> {prev_fmt}",
-        ]
+        lines.append(f"📉 <b>آخر سعر:</b> {prev_fmt}")
         if savings > 0:
             lines.extend([
                 f"💵 <b>وفرت:</b> {savings_fmt}",
@@ -343,12 +431,7 @@ def format_resale_restock_message(
         else:
             lines.append("📦 <b>الحالة:</b> Used / Amazon Resale\n")
     else:
-        lines = [
-            "♻️ <b>Amazon Resale متاح!</b>\n",
-            f"📦 <b>{short_title(title, 80)}</b>\n",
-            f"💰 <b>سعر Amazon Resale الحالي:</b> {curr_fmt}",
-            "📦 <b>الحالة:</b> Used / Amazon Resale\n",
-        ]
+        lines.append("📦 <b>الحالة:</b> Used / Amazon Resale\n")
 
     if stats and stats.get("has_data") and stats.get("is_lowest"):
         lines.append("🏷️ <b>تنويه:</b> هذا السعر هو أقل سعر مسجل بالمرصد حتى الآن.")

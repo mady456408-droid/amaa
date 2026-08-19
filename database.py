@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import statistics
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ SETTING_PRODUCT_BUTTON_LAYOUT = "product_button_layout"
 SETTING_PRODUCT_BUTTON_TEMPLATE = "product_button_template"
 SETTING_MAX_PRODUCT_BUTTONS = "max_product_buttons"
 SETTING_MIN_PRICE_DROP = "min_price_drop"
+SETTING_SMART_RESTOCK_DEAL_PCT = "smart_restock_deal_pct"
 SETTING_GEMINI_ENABLED = "gemini_enabled"
 SETTING_GEMINI_MODEL = "gemini_model"
 SETTING_GEMINI_SYSTEM_PROMPT = "gemini_system_prompt"
@@ -35,18 +37,56 @@ SETTING_PRICE_MONITOR_INTERVAL_MIN = "price_monitor_interval_min"
 SETTING_LAST_PRICE_CHECK_TIME = "last_price_check_time"
 
 
+def compute_reference_price(records: list[dict[str, Any]]) -> float | None:
+    """
+    Compute robust reference price from price_history records for a specific seller_type.
+    Rules:
+    - Ignore NULLs, <= 0 prices, and OUT_OF_STOCK records.
+    - N = 0 -> None
+    - N = 1 -> p[0]
+    - N = 2 -> max(p[0], p[1])
+    - N >= 3 -> median(valid_prices)
+    """
+    valid_prices = []
+    for r in records:
+        if r.get("availability") == "OUT_OF_STOCK":
+            continue
+        val = r.get("final_price") if r.get("final_price") is not None else r.get("price_value")
+        if val is not None:
+            try:
+                fval = float(val)
+                if fval > 0:
+                    valid_prices.append(fval)
+            except (ValueError, TypeError):
+                pass
+
+    if not valid_prices:
+        return None
+    if len(valid_prices) == 1:
+        return valid_prices[0]
+    if len(valid_prices) == 2:
+        return max(valid_prices)
+    return float(statistics.median(valid_prices))
+
+
 class Database:
     def __init__(self, db_path: str):
         self.db_path = str(Path(db_path))
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn = sqlite3.connect(self.db_path, timeout=15.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=10000;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
         return conn
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
+            mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+            logger.info("DATABASE INIT: db_path=%s journal_mode=%s", self.db_path, mode)
+            assert str(mode).upper() == "WAL", f"WAL mode verification failed: got {mode}"
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS sources (
@@ -147,6 +187,8 @@ class Database:
                 conn.execute("ALTER TABLE draft_posts ADD COLUMN list_price TEXT")
             if "short_title" not in draft_cols:
                 conn.execute("ALTER TABLE draft_posts ADD COLUMN short_title TEXT")
+            if "seller_type" not in draft_cols:
+                conn.execute("ALTER TABLE draft_posts ADD COLUMN seller_type TEXT NOT NULL DEFAULT 'NEW_AMAZON'")
 
             published_cols = {
                 row[1]
@@ -160,9 +202,25 @@ class Database:
                 ("published_currency", "TEXT"),
                 ("last_checked_at", "TEXT"),
                 ("destination_id", "INTEGER"),
+                ("seller_type", "TEXT NOT NULL DEFAULT 'NEW_AMAZON'"),
             ):
                 if col not in published_cols:
                     conn.execute(f"ALTER TABLE published_products ADD COLUMN {col} {col_type}")
+
+            pending_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(pending_approvals)").fetchall()
+            }
+            if "price" not in pending_cols:
+                conn.execute(
+                    "ALTER TABLE pending_approvals ADD COLUMN price TEXT NOT NULL DEFAULT ''"
+                )
+            if "coupon" not in pending_cols:
+                conn.execute("ALTER TABLE pending_approvals ADD COLUMN coupon TEXT")
+            if "list_price" not in pending_cols:
+                conn.execute("ALTER TABLE pending_approvals ADD COLUMN list_price TEXT")
+            if "seller_type" not in pending_cols:
+                conn.execute("ALTER TABLE pending_approvals ADD COLUMN seller_type TEXT NOT NULL DEFAULT 'NEW_AMAZON'")
 
             # Add optimized index for destination-aware lookups
             conn.execute(
@@ -333,7 +391,7 @@ class Database:
                 "ON price_history (asin, seller_type, recorded_at DESC)"
             )
 
-            # Migration: Ensure availability and last valid price columns in published_products
+            # Migration: Ensure availability, last valid price, and reference price columns in published_products
             published_cols = {
                 row[1]
                 for row in conn.execute("PRAGMA table_info(published_products)").fetchall()
@@ -343,9 +401,39 @@ class Database:
                 ("new_last_valid_price", "REAL"),
                 ("resale_availability", "TEXT DEFAULT 'OUT_OF_STOCK'"),
                 ("resale_last_valid_price", "REAL"),
+                ("new_reference_price", "REAL"),
+                ("resale_reference_price", "REAL"),
             ):
                 if col not in published_cols:
                     conn.execute(f"ALTER TABLE published_products ADD COLUMN {col} {col_type}")
+
+            # Migration: Backfill reference prices if NULL
+            unref_rows = conn.execute(
+                "SELECT id, asin FROM published_products WHERE new_reference_price IS NULL OR resale_reference_price IS NULL"
+            ).fetchall()
+            for r in unref_rows:
+                p_id = r["id"]
+                p_asin = r["asin"].upper()
+                
+                # NEW_AMAZON
+                ph_new = conn.execute(
+                    "SELECT final_price, price_value, availability FROM price_history WHERE asin = ? AND seller_type = 'NEW_AMAZON'",
+                    (p_asin,),
+                ).fetchall()
+                ref_new = compute_reference_price([dict(row) for row in ph_new])
+                
+                # AMAZON_RESALE
+                ph_resale = conn.execute(
+                    "SELECT final_price, price_value, availability FROM price_history WHERE asin = ? AND seller_type = 'AMAZON_RESALE'",
+                    (p_asin,),
+                ).fetchall()
+                ref_resale = compute_reference_price([dict(row) for row in ph_resale])
+                
+                if ref_new is not None or ref_resale is not None:
+                    conn.execute(
+                        "UPDATE published_products SET new_reference_price = COALESCE(new_reference_price, ?), resale_reference_price = COALESCE(resale_reference_price, ?) WHERE id = ?",
+                        (ref_new, ref_resale, p_id),
+                    )
 
             conn.commit()
 
@@ -750,6 +838,7 @@ class Database:
         published_list_price: str | None = None,
         published_list_price_value: float | None = None,
         published_currency: str | None = None,
+        seller_type: str = "NEW_AMAZON",
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
@@ -758,8 +847,8 @@ class Database:
                 INSERT INTO published_products
                     (asin, title, source_channel_id, destination_message_id, published_at,
                      destination_id, published_price, published_price_value, published_list_price,
-                     published_list_price_value, published_currency)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     published_list_price_value, published_currency, seller_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     asin.upper(),
@@ -773,6 +862,7 @@ class Database:
                     published_list_price,
                     published_list_price_value,
                     published_currency,
+                    seller_type,
                 ),
             )
             conn.commit()
@@ -783,6 +873,20 @@ class Database:
             row = conn.execute(
                 "SELECT * FROM published_products WHERE id = ?",
                 (published_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_published_product_by_asin(self, asin: str) -> dict[str, Any] | None:
+        """Fetch most recent published product record by ASIN (case-insensitive)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM published_products
+                WHERE asin = ?
+                ORDER BY published_at DESC, id DESC
+                LIMIT 1
+                """,
+                (asin.upper(),),
             ).fetchone()
         return dict(row) if row else None
 
@@ -833,14 +937,16 @@ class Database:
         published_list_price: str | None,
         published_list_price_value: float | None,
         published_currency: str | None,
+        seller_type: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
-            # First, get current values to preserve as previous_*
             current = conn.execute(
                 "SELECT * FROM published_products WHERE id = ?",
                 (published_id,),
             ).fetchone()
+
+            stype = seller_type or (dict(current).get("seller_type") if current else "NEW_AMAZON")
 
             if current:
                 conn.execute(
@@ -859,7 +965,8 @@ class Database:
                         published_price_value = ?,
                         published_list_price = ?,
                         published_list_price_value = ?,
-                        published_currency = ?
+                        published_currency = ?,
+                        seller_type = ?
                     WHERE id = ?
                     """,
                     (
@@ -873,11 +980,11 @@ class Database:
                         published_list_price,
                         published_list_price_value,
                         published_currency,
+                        stype,
                         published_id,
                     ),
                 )
             else:
-                # Fallback if record not found (shouldn't happen)
                 conn.execute(
                     """
                     UPDATE published_products
@@ -890,7 +997,8 @@ class Database:
                         published_price_value = ?,
                         published_list_price = ?,
                         published_list_price_value = ?,
-                        published_currency = ?
+                        published_currency = ?,
+                        seller_type = ?
                     WHERE id = ?
                     """,
                     (
@@ -904,6 +1012,7 @@ class Database:
                         published_list_price,
                         published_list_price_value,
                         published_currency,
+                        stype,
                         published_id,
                     ),
                 )
@@ -1049,12 +1158,13 @@ class Database:
     def execute_bulk_monitoring_db_updates(
         self,
         product_check_updates: list[tuple[float, int]],
-        seller_state_updates: list[tuple[str, float | None, int, str]],
+        seller_state_updates: list[Any],
         history_records: list[dict[str, Any]],
     ) -> None:
         """
         Execute all state updates and history insertions in a single atomic transaction.
         If any query fails, the entire transaction rolls back cleanly.
+        Supports seller_state_updates items as 4-tuples or 5-tuples (with reference_price).
         """
         with self._connect() as conn:
             for curr_final, product_id in product_check_updates:
@@ -1063,36 +1173,38 @@ class Database:
                     (curr_final, product_id),
                 )
 
-            for availability, last_valid_price, product_id, seller_type in seller_state_updates:
-                prefix = "new" if seller_type == "NEW_AMAZON" else "resale"
-                if last_valid_price is not None:
-                    conn.execute(
-                        f"""
-                        UPDATE published_products
-                        SET {prefix}_availability = ?, {prefix}_last_valid_price = ?
-                        WHERE id = ?
-                        """,
-                        (availability, last_valid_price, product_id),
-                    )
+            for item_update in seller_state_updates:
+                reference_price = None
+                if len(item_update) == 5:
+                    availability, last_valid_price, reference_price, product_id, seller_type = item_update
                 else:
-                    conn.execute(
-                        f"""
-                        UPDATE published_products
-                        SET {prefix}_availability = ?
-                        WHERE id = ?
-                        """,
-                        (availability, product_id),
-                    )
+                    availability, last_valid_price, product_id, seller_type = item_update
+
+                prefix = "new" if seller_type == "NEW_AMAZON" else "resale"
+                updates = [f"{prefix}_availability = ?"]
+                params = [availability]
+
+                if last_valid_price is not None:
+                    updates.append(f"{prefix}_last_valid_price = ?")
+                    params.append(last_valid_price)
+
+                if reference_price is not None:
+                    updates.append(f"{prefix}_reference_price = ?")
+                    params.append(reference_price)
+
+                params.append(product_id)
+                sql = f"UPDATE published_products SET {', '.join(updates)} WHERE id = ?"
+                conn.execute(sql, tuple(params))
 
             for rec in history_records:
                 now = rec.get("recorded_at") or datetime.now(timezone.utc).isoformat()
                 conn.execute(
                     """
                     INSERT INTO price_history
-                        (tracked_product_id, asin, price, price_value, list_price,
-                         list_price_value, coupon, final_price, seller_name, availability,
-                         marketplace, price_change_amount, price_change_percent,
-                         change_type, recorded_at, price_source, seller_type, seller_id)
+                    (tracked_product_id, asin, price, price_value, list_price, list_price_value,
+                     coupon, final_price, seller_name, availability, marketplace,
+                     price_change_amount, price_change_percent, change_type, recorded_at,
+                     price_source, seller_type, seller_id)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
@@ -1109,14 +1221,51 @@ class Database:
                         rec.get("marketplace", "www.amazon.eg"),
                         rec.get("price_change_amount", 0.0),
                         rec.get("price_change_percent", 0.0),
-                        rec.get("change_type", "initial"),
+                        rec.get("change_type"),
                         now,
                         rec.get("price_source", "creators_api"),
                         rec.get("seller_type", "NEW_AMAZON"),
                         rec.get("seller_id", "A1ZVRGNO5AYLOV"),
                     ),
                 )
+            conn.commit()
 
+    def get_smart_restock_deal_pct(self) -> float:
+        val = self.get_setting(SETTING_SMART_RESTOCK_DEAL_PCT)
+        if val is None:
+            return 10.0
+        try:
+            return float(val)
+        except ValueError:
+            return 10.0
+
+    def set_smart_restock_deal_pct(self, val: float) -> None:
+        self.set_setting(SETTING_SMART_RESTOCK_DEAL_PCT, str(val))
+
+    def update_published_product_seller_state(
+        self,
+        published_id: int,
+        seller_type: str,
+        availability: str,
+        last_valid_price: float | None,
+        reference_price: float | None = None,
+    ) -> None:
+        prefix = "new" if seller_type == "NEW_AMAZON" else "resale"
+        updates = [f"{prefix}_availability = ?"]
+        params = [availability]
+
+        if last_valid_price is not None:
+            updates.append(f"{prefix}_last_valid_price = ?")
+            params.append(last_valid_price)
+
+        if reference_price is not None:
+            updates.append(f"{prefix}_reference_price = ?")
+            params.append(reference_price)
+
+        params.append(published_id)
+        sql = f"UPDATE published_products SET {', '.join(updates)} WHERE id = ?"
+        with self._connect() as conn:
+            conn.execute(sql, tuple(params))
             conn.commit()
 
     def get_price_history_records(self, asin: str, seller_type: str = "NEW_AMAZON", limit: int = 50) -> list[dict[str, Any]]:
@@ -1266,6 +1415,7 @@ class Database:
         image_path: str,
         coupon: str | None = None,
         list_price: str | None = None,
+        seller_type: str = "NEW_AMAZON",
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
@@ -1273,8 +1423,8 @@ class Database:
                 """
                 INSERT INTO pending_approvals
                     (asin, title, price, clean_url, source_channel_id, caption,
-                     image_path, status, created_at, coupon, list_price)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                     image_path, status, created_at, coupon, list_price, seller_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
                 """,
                 (
                     asin.upper(),
@@ -1287,6 +1437,7 @@ class Database:
                     now,
                     coupon,
                     list_price,
+                    seller_type,
                 ),
             )
             conn.commit()
@@ -1505,6 +1656,71 @@ class Database:
                 """,
                 (asin.upper(), english_title, arabic_title, now),
             )
+            conn.commit()
+
+    def set_creators_cache_bulk(
+        self,
+        cache_entries: list[tuple[str, str, dict[str, Any], int]],
+        title_entries: list[tuple[str, str, str]] | None = None,
+        image_entries: list[tuple[str, str]] | None = None,
+    ) -> None:
+        """
+        Save Creators API payload, title cache, and image URL cache in a single atomic transaction per batch.
+        """
+        if not cache_entries and not title_entries and not image_entries:
+            return
+
+        now_dt = datetime.now(timezone.utc)
+        now_iso = now_dt.isoformat()
+
+        with self._connect() as conn:
+            for asin, profile, payload, ttl in cache_entries:
+                expires = (now_dt + timedelta(seconds=ttl)).isoformat()
+                conn.execute(
+                    """
+                    INSERT INTO creators_cache (asin, profile, payload_json, expires_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(asin, profile) DO UPDATE SET
+                        payload_json = excluded.payload_json,
+                        expires_at = excluded.expires_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        asin.upper(),
+                        profile,
+                        json.dumps(payload, ensure_ascii=False),
+                        expires,
+                        now_iso,
+                    ),
+                )
+
+            if title_entries:
+                for asin, eng_title, ara_title in title_entries:
+                    conn.execute(
+                        """
+                        INSERT INTO creators_title_cache (asin, english_title, arabic_title, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(asin) DO UPDATE SET
+                            english_title = excluded.english_title,
+                            arabic_title = excluded.arabic_title,
+                            updated_at = excluded.updated_at
+                        """,
+                        (asin.upper(), eng_title, ara_title, now_iso),
+                    )
+
+            if image_entries:
+                for asin, img_url in image_entries:
+                    conn.execute(
+                        """
+                        INSERT INTO creators_image_url_cache (asin, image_url, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(asin) DO UPDATE SET
+                            image_url = excluded.image_url,
+                            updated_at = excluded.updated_at
+                        """,
+                        (asin.upper(), img_url, now_iso),
+                    )
+
             conn.commit()
 
     # --- Price drop tracking (infrastructure for future alerts) ---

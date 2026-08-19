@@ -91,23 +91,34 @@ async def validate_and_fetch_url(
     try:
         logger.info("VALIDATING URL %s: %s", index, url)
 
+        seller_type = "AMAZON_RESALE" if ("A2N2MP47XAP1MK" in url or "m=A2N2MP47XAP1MK" in url) else "NEW_AMAZON"
+
         asin = extract_asin(url)
         if asin:
             logger.info("ASIN in URL — skip HTTP redirect")
         else:
             final_url = await resolve_redirect(url)
             logger.info("REDIRECT RESOLVED: %s", final_url)
+            if "A2N2MP47XAP1MK" in final_url or "m=A2N2MP47XAP1MK" in final_url:
+                seller_type = "AMAZON_RESALE"
             asin = extract_asin(final_url)
 
         if not asin:
             logger.warning("URL FAILED — no ASIN for %s", url)
             return None
 
-        logger.info("ASIN FOUND: %s", asin)
+        logger.info("ASIN FOUND: %s seller_type=%s", asin, seller_type)
 
-        clean_url = build_clean_url(asin, AMAZON_DOMAIN)
+        merchant_id = "A2N2MP47XAP1MK" if seller_type == "AMAZON_RESALE" else "A1ZVRGNO5AYLOV"
+        clean_url = build_clean_url(asin, AMAZON_DOMAIN, merchant_id=merchant_id if seller_type == "AMAZON_RESALE" else None)
         scrape_asin = f"{asin}_{message_id}_{index}"
         coupon_enabled = db.get_coupon_detection_enabled()
+
+        if seller_type == "AMAZON_RESALE":
+            logger.info("RESALE PUBLISH START asin=%s merchant_id=%s", asin, merchant_id)
+        else:
+            logger.info("NEW PUBLISH START asin=%s merchant_id=%s", asin, merchant_id)
+
         product = await fetch_product(
             db,
             browser,
@@ -115,31 +126,31 @@ async def validate_and_fetch_url(
             clean_url,
             scrape_asin,
             coupon_enabled=coupon_enabled,
+            seller_type=seller_type,
         )
         
-        # Validate price before proceeding
-        if not _valid_price(product["price"]):
-            logger.warning(
-                "PRODUCT SKIPPED\n"
-                "  reason=price_not_found\n"
-                "  asin=%s\n"
-                "  raw_price=%r",
-                asin,
-                product["price"],
-            )
+        # Strict validation of price and seller availability
+        if product.get("seller_offer_available") is False or not _valid_price(product.get("price")):
+            if seller_type == "AMAZON_RESALE":
+                logger.warning("RESALE OFFER MISSING asin=%s action=ABORT_PUBLISH", asin)
+            else:
+                logger.warning("NEW OFFER MISSING asin=%s action=ABORT_PUBLISH", asin)
             return None
         
         display_url = resolve_display_url(product, clean_url)
+        logger.info("%s PUBLISH URL asin=%s display_url=%s", "RESALE" if seller_type == "AMAZON_RESALE" else "NEW", asin, display_url)
+
         # Try to shorten the URL using Amazon SiteStripe
         short_url = await shorten_amazon_url(display_url, db)
         if short_url:
             display_url = short_url
 
         logger.info(
-            "SCRAPE SUCCESS: %r %r coupon=%r",
+            "SCRAPE SUCCESS: %r %r coupon=%r seller_type=%s",
             product["title"],
             product["price"],
             product.get("coupon"),
+            seller_type,
         )
 
         coupon = product.get("coupon") if coupon_enabled else None
@@ -164,7 +175,6 @@ async def validate_and_fetch_url(
                 product=product,
             )
 
-        # Return all data needed for publishing
         return {
             "asin": asin,
             "clean_url": clean_url,
@@ -175,6 +185,7 @@ async def validate_and_fetch_url(
             "coupon_kwargs": coupon_kwargs,
             "message_id": message_id,
             "index": index,
+            "seller_type": seller_type,
         }
 
     except Exception:
@@ -206,9 +217,10 @@ async def publish_validated_product(
         caption = validated_data["caption"]
         coupon = validated_data["coupon"]
         index = validated_data["index"]
+        seller_type = validated_data.get("seller_type") or product.get("seller_type") or "NEW_AMAZON"
         total = 1  # Single product
 
-        logger.info("PUBLISHING VALIDATED PRODUCT %s asin=%s", index, asin)
+        logger.info("PUBLISHING VALIDATED PRODUCT %s asin=%s seller_type=%s", index, asin, seller_type)
 
         # Apply AI rewrite if business logic allows (single product only)
         # Provider enable/disable is handled by ai_rewriter.py
@@ -242,6 +254,7 @@ async def publish_validated_product(
                 image_path=held_for_approval,
                 coupon=coupon,
                 list_price=product.get("list_price"),
+                seller_type=seller_type,
             )
             await send_approval_request(
                 application.bot,
@@ -308,6 +321,7 @@ async def publish_validated_product(
                     source_channel_id,
                     publish_result.message_id,
                     destination_id=publish_result.destination_id,
+                    seller_type=seller_type,
                     **price_fields,
                 )
 

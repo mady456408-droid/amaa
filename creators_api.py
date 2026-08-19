@@ -417,36 +417,73 @@ class TokenManager:
 
 
 class CreatorsRateLimiter:
-    """Global asyncio-safe limiter: TPS + daily quota."""
+    """Asyncio-safe limiter: TPS + daily quota."""
 
-    def __init__(self, *, tps: float = CREATORS_API_TPS, tpd: int = CREATORS_API_TPD):
+    def __init__(
+        self,
+        name: str = "REALTIME",
+        *,
+        tps: float = CREATORS_API_TPS,
+        tpd: int = CREATORS_API_TPD,
+    ):
+        self.name = name
         self._min_interval = 1.0 / tps if tps > 0 else 0.0
         self._tpd = tpd
         self._lock = asyncio.Lock()
         self._last_request = 0.0
         self._day_key = ""
         self._day_count = 0
+        self._queue_depth = 0
+        self._active_requests = 0
 
-    async def acquire(self) -> None:
+    async def acquire(self, source: str = "REALTIME") -> None:
+        wait = 0.0
         async with self._lock:
+            self._queue_depth += 1
+            curr_queue = self._queue_depth
+
             day_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if day_key != self._day_key:
                 self._day_key = day_key
                 self._day_count = 0
 
             if self._day_count >= self._tpd:
+                self._queue_depth -= 1
                 raise CreatorsAPIError(
                     "Daily Creators API quota exceeded",
                     status_code=429,
                 )
 
             now = time.monotonic()
-            wait = self._min_interval - (now - self._last_request)
-            if wait > 0:
-                await asyncio.sleep(wait)
+            if self._last_request <= now:
+                target_time = now
+            else:
+                target_time = self._last_request + self._min_interval
 
-            self._last_request = time.monotonic()
+            wait = max(0.0, target_time - now)
+            self._last_request = target_time
             self._day_count += 1
+            self._active_requests += 1
+
+            logger.info(
+                "CREATORS RATE LIMIT: name=%s source=%s wait_ms=%.1f active_requests=%s queue_depth=%s",
+                self.name,
+                source,
+                wait * 1000.0,
+                self._active_requests,
+                curr_queue,
+            )
+
+        # Sleep OUTSIDE the lock to prevent blocking callers
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        async with self._lock:
+            self._queue_depth = max(0, self._queue_depth - 1)
+
+    async def release_request(self) -> None:
+        async with self._lock:
+            self._active_requests = max(0, self._active_requests - 1)
 
 
 def _format_egp_price(money: dict[str, Any] | None) -> str:
@@ -470,11 +507,87 @@ def _format_egp_price(money: dict[str, Any] | None) -> str:
     return "Not found"
 
 
-def _pick_buy_box_listing(listings: list[dict]) -> dict | None:
+NEW_AMAZON_SELLER_ID = "A1ZVRGNO5AYLOV"
+AMAZON_RESALE_SELLER_ID = "A2N2MP47XAP1MK"
+
+
+def _parse_price_val(text: str | None) -> float | None:
+    if not text:
+        return None
+    cleaned = re.sub(r"[^\d.]", "", text.replace(",", "."))
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def extract_seller_offer(
+    item: Any | None,
+    seller_type: str,
+) -> tuple[str, str | None, float | None, str | None, float | None, str | None]:
+    """
+    Extract seller offer details for seller_type ('NEW_AMAZON' or 'AMAZON_RESALE').
+    Returns tuple: (status, price_text, price_value, list_price_text, list_price_value, seller_name)
+    status: 'AVAILABLE', 'OUT_OF_STOCK', 'MISSING_MERCHANT', or 'UNKNOWN' (API failure)
+    """
+    if not item:
+        return ("UNKNOWN", None, None, None, None, None)
+
+    target_merchant_id = NEW_AMAZON_SELLER_ID if seller_type == "NEW_AMAZON" else AMAZON_RESALE_SELLER_ID
+
+    if isinstance(item, dict) and seller_type in item:
+        data = item[seller_type]
+        m_id = data.get("merchant_id") or ""
+        avail = data.get("availability") or "IN_STOCK"
+        if m_id == target_merchant_id:
+            if avail == "OUT_OF_STOCK" or data.get("price") is None:
+                return ("OUT_OF_STOCK", None, None, None, None, None)
+            val = float(data["price"])
+            p_text = f"{val:.2f} EGP"
+            s_name = data.get("merchant_name") or ("Amazon.eg" if seller_type == "NEW_AMAZON" else "Amazon Resale")
+            return ("AVAILABLE", p_text, val, None, None, s_name)
+        return ("MISSING_MERCHANT", None, None, None, None, None)
+
+    if isinstance(item, dict):
+        listings = item.get("raw_listings") or []
+    else:
+        listings = getattr(item, "raw_listings", []) or []
+
+    merchant_found = False
+    matching_offers = []
+
     for listing in listings:
-        if listing.get("isBuyBoxWinner"):
-            return listing
-    return listings[0] if listings else None
+        merchant_info = listing.get("merchantInfo") or {}
+        m_id = merchant_info.get("id") or ""
+        if m_id == target_merchant_id:
+            merchant_found = True
+            price_obj = listing.get("price") or {}
+            price_text = _format_egp_price(price_obj.get("money"))
+            if price_text != "Not found":
+                val = _parse_price_val(price_text)
+                if val and val > 0:
+                    basis = price_obj.get("savingBasis") or {}
+                    basis_money = basis.get("money") if isinstance(basis, dict) else None
+                    list_price_text = _format_egp_price(basis_money) if basis_money else None
+                    if list_price_text == "Not found":
+                        list_price_text = None
+                    list_val = _parse_price_val(list_price_text) if list_price_text else None
+
+                    seller_name = (merchant_info.get("name") or "").strip() or None
+                    if seller_type == "NEW_AMAZON" and not seller_name:
+                        seller_name = "Amazon.eg"
+
+                    matching_offers.append((val, price_text, list_price_text, list_val, seller_name))
+
+    if not merchant_found:
+        return ("MISSING_MERCHANT", None, None, None, None, None)
+
+    if not matching_offers:
+        return ("OUT_OF_STOCK", None, None, None, None, None)
+
+    matching_offers.sort(key=lambda x: x[0])
+    lowest_offer = matching_offers[0]
+    return ("AVAILABLE", lowest_offer[1], lowest_offer[0], lowest_offer[2], lowest_offer[3], lowest_offer[4])
 
 
 def _contains_arabic(text: str) -> bool:
@@ -607,7 +720,8 @@ class CreatorsClient:
     partner_tag: str = CREATORS_PARTNER_TAG
     _http: httpx.AsyncClient | None = field(default=None, repr=False)
     _token_manager: TokenManager | None = field(default=None, repr=False)
-    _limiter: CreatorsRateLimiter = field(default_factory=CreatorsRateLimiter)
+    _realtime_limiter: CreatorsRateLimiter = field(default_factory=lambda: CreatorsRateLimiter("REALTIME"))
+    _monitoring_limiter: CreatorsRateLimiter = field(default_factory=lambda: CreatorsRateLimiter("MONITOR"))
 
     def __post_init__(self) -> None:
         if self._token_manager is None:
@@ -667,19 +781,20 @@ class CreatorsClient:
         else:
             missing = list(normalized_asins)
 
+        source_label = "MONITOR" if profile == "price_drop" else "REALTIME"
+        limiter = self._monitoring_limiter if profile == "price_drop" else self._realtime_limiter
+
         for i in range(0, len(missing), 10):
             batch = missing[i : i + 10]
-            batch_results = await self._fetch_items_batch(batch, resources)
+            batch_results = await self._fetch_items_batch(batch, resources, limiter=limiter, source=source_label)
             ttl = PROFILE_TTL_SECONDS.get(profile, 3600)
+            cache_entries = []
             for asin, item in batch_results.items():
                 results[asin] = item
                 if db is not None:
-                    db.set_creators_cache(
-                        asin,
-                        profile,
-                        item.to_dict(),
-                        ttl_seconds=ttl,
-                    )
+                    cache_entries.append((asin, profile, item.to_dict(), ttl))
+            if db is not None and cache_entries:
+                db.set_creators_cache_bulk(cache_entries)
 
         return results
 
@@ -687,92 +802,97 @@ class CreatorsClient:
         self,
         asins: list[str],
         resources: list[str],
+        limiter: CreatorsRateLimiter | None = None,
+        source: str = "REALTIME",
     ) -> dict[str, NormalizedItem]:
-        await self._limiter.acquire()
-        token = await self._token_manager.get_token()
-
-        body = {
-            "itemIds": asins,
-            "itemIdType": "ASIN",
-            "partnerTag": self.partner_tag,
-            "marketplace": self.marketplace,
-            "resources": resources,
-        }
-        languages_of_preference = _languages_of_preference(self.marketplace)
-        if languages_of_preference:
-            body["languagesOfPreference"] = languages_of_preference
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": _auth_header(token, self.version),
-            "x-marketplace": self.marketplace,
-        }
-
-        url = f"{CATALOG_BASE}/getItems"
-        client = self._client()
-
-        # Diagnostic logs — no secrets, no raw Authorization value.
-        _log_creators_request(
-            version=self.version,
-            marketplace=self.marketplace,
-            partner_tag=self.partner_tag,
-            item_ids=asins,
-            resources=resources,
-            languages_of_preference=languages_of_preference,
-        )
-        _log_creators_headers(marketplace=self.marketplace)
-
+        target_limiter = limiter or self._realtime_limiter
+        await target_limiter.acquire(source=source)
         try:
-            resp = await client.post(url, json=body, headers=headers)
-        except httpx.HTTPError as exc:
-            raise CreatorsAPIError(f"HTTP error: {exc}") from exc
+            token = await self._token_manager.get_token()
 
-        response_text = resp.text or ""
-        parsed = _log_creators_response(resp)
+            body = {
+                "itemIds": asins,
+                "itemIdType": "ASIN",
+                "partnerTag": self.partner_tag,
+                "marketplace": self.marketplace,
+                "resources": resources,
+            }
+            languages_of_preference = _languages_of_preference(self.marketplace)
+            if languages_of_preference:
+                body["languagesOfPreference"] = languages_of_preference
 
-        if resp.status_code == 429:
-            raise CreatorsAPIError(
-                "Rate limited",
-                status_code=429,
-                response_body=response_text[:_RESPONSE_BODY_LOG_LIMIT],
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": _auth_header(token, self.version),
+                "x-marketplace": self.marketplace,
+            }
+
+            url = f"{CATALOG_BASE}/getItems"
+            client = self._client()
+
+            _log_creators_request(
+                version=self.version,
+                marketplace=self.marketplace,
+                partner_tag=self.partner_tag,
+                item_ids=asins,
+                resources=resources,
+                languages_of_preference=languages_of_preference,
             )
-        if resp.status_code >= 500:
-            raise CreatorsAPIError(
-                f"Server error HTTP {resp.status_code}",
-                status_code=resp.status_code,
-                response_body=response_text[:_RESPONSE_BODY_LOG_LIMIT],
+            _log_creators_headers(marketplace=self.marketplace)
+
+            try:
+                resp = await client.post(url, json=body, headers=headers)
+            except httpx.HTTPError as exc:
+                raise CreatorsAPIError(f"HTTP error: {exc}") from exc
+
+            response_text = resp.text or ""
+            parsed = _log_creators_response(resp)
+
+            if resp.status_code == 429:
+                raise CreatorsAPIError(
+                    "Rate limited",
+                    status_code=429,
+                    response_body=response_text[:_RESPONSE_BODY_LOG_LIMIT],
+                )
+            if resp.status_code >= 500:
+                raise CreatorsAPIError(
+                    "Server error HTTP {resp.status_code}",
+                    status_code=resp.status_code,
+                    response_body=response_text[:_RESPONSE_BODY_LOG_LIMIT],
+                )
+            if resp.status_code >= 400:
+                raise CreatorsAPIError(
+                    "Request failed HTTP {resp.status_code}",
+                    status_code=resp.status_code,
+                    response_body=response_text[:_RESPONSE_BODY_LOG_LIMIT],
+                )
+
+            try:
+                data = parsed if parsed is not None else resp.json()
+            except json.JSONDecodeError as exc:
+                raise CreatorsAPIError(
+                    "Malformed JSON response",
+                    response_body=response_text[:_RESPONSE_BODY_LOG_LIMIT],
+                ) from exc
+
+            if data.get("errors"):
+                logger.warning("CREATORS API partial errors: %s", data["errors"])
+
+            items = (data.get("itemsResult") or {}).get("items") or []
+            out: dict[str, NormalizedItem] = {}
+            for raw in items:
+                item = normalize_item(raw)
+                if item:
+                    out[item.asin] = item
+
+            logger.info(
+                "CREATORS API SUCCESS requested=%s returned=%s",
+                len(asins),
+                len(out),
             )
-        if resp.status_code >= 400:
-            raise CreatorsAPIError(
-                f"Request failed HTTP {resp.status_code}",
-                status_code=resp.status_code,
-                response_body=response_text[:_RESPONSE_BODY_LOG_LIMIT],
-            )
-
-        try:
-            data = parsed if parsed is not None else resp.json()
-        except json.JSONDecodeError as exc:
-            raise CreatorsAPIError(
-                "Malformed JSON response",
-                response_body=response_text[:_RESPONSE_BODY_LOG_LIMIT],
-            ) from exc
-
-        if data.get("errors"):
-            logger.warning("CREATORS API partial errors: %s", data["errors"])
-
-        items = (data.get("itemsResult") or {}).get("items") or []
-        out: dict[str, NormalizedItem] = {}
-        for raw in items:
-            item = normalize_item(raw)
-            if item:
-                out[item.asin] = item
-
-        logger.info(
-            "CREATORS API SUCCESS requested=%s returned=%s",
-            len(asins),
-            len(out),
-        )
-        return out
+            return out
+        finally:
+            await target_limiter.release_request()
 
 
 # Module-level singleton (initialized at bot startup when configured).

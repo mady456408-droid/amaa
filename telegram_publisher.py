@@ -48,6 +48,23 @@ def build_caption(
     return "\n".join(lines)
 
 
+def build_resale_caption(
+    title: str,
+    price: str,
+    resale_url: str,
+) -> str:
+    """Build caption for Amazon Resale posts."""
+    lines = [
+        "♻️ <b>Amazon Resale</b>\n",
+        f"📦 <b>{title}</b>\n",
+        f"💰 <b>بسعر {price}</b>",
+        "📦 <b>الحالة:</b> Used / Amazon Resale\n",
+        "🔗 <b>شوف العرض:</b>",
+        resale_url,
+    ]
+    return "\n".join(lines)
+
+
 def build_overflow_caption(product_count: int = 1) -> str:
     """Build short caption for overflow mode."""
     return (
