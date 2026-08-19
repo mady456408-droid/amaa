@@ -21,6 +21,7 @@ from urllib.parse import urlencode
 import httpx
 
 from amazon_image_url import pick_best_primary_image_url
+from coupon_price import parse_price_number
 from config import (
     CREATORS_API_TPD,
     CREATORS_API_TPS,
@@ -490,20 +491,26 @@ def _format_egp_price(money: dict[str, Any] | None) -> str:
     """Format API money object as Egyptian Pounds display string."""
     if not money:
         return "Not found"
-    display = (money.get("displayAmount") or "").strip()
-    if display:
-        if "جنيه" in display or "EGP" in display.upper():
-            return display
-        return f"{display} جنيه"
     amount = money.get("amount")
     if amount is not None:
         try:
             val = float(amount)
+            if val > 0:
+                if abs(val - round(val)) < 0.01:
+                    return f"{int(round(val))} جنيه"
+                return f"{val:.2f} جنيه"
+        except (TypeError, ValueError):
+            pass
+    display = (money.get("displayAmount") or "").strip()
+    if display:
+        val = parse_price_number(display)
+        if val and val > 0:
             if abs(val - round(val)) < 0.01:
                 return f"{int(round(val))} جنيه"
             return f"{val:.2f} جنيه"
-        except (TypeError, ValueError):
-            pass
+        if "جنيه" in display or "EGP" in display.upper():
+            return display
+        return f"{display} جنيه"
     return "Not found"
 
 
@@ -514,11 +521,7 @@ AMAZON_RESALE_SELLER_ID = "A2N2MP47XAP1MK"
 def _parse_price_val(text: str | None) -> float | None:
     if not text:
         return None
-    cleaned = re.sub(r"[^\d.]", "", text.replace(",", "."))
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
+    return parse_price_number(text)
 
 
 def extract_seller_offer(
@@ -537,7 +540,7 @@ def extract_seller_offer(
 
     if isinstance(item, dict) and seller_type in item:
         data = item[seller_type]
-        m_id = data.get("merchant_id") or ""
+        m_id = (data.get("merchant_id") or "").strip().upper()
         avail = data.get("availability") or "IN_STOCK"
         if m_id == target_merchant_id:
             if avail == "OUT_OF_STOCK" or data.get("price") is None:
@@ -558,10 +561,34 @@ def extract_seller_offer(
 
     for listing in listings:
         merchant_info = listing.get("merchantInfo") or {}
-        m_id = merchant_info.get("id") or ""
+        m_id = (
+            merchant_info.get("id")
+            or merchant_info.get("merchantId")
+            or merchant_info.get("sellerId")
+            or listing.get("merchantId")
+            or listing.get("sellerId")
+            or ""
+        ).strip().upper()
+
+        m_name = merchant_info.get("name") or merchant_info.get("displayName") or ""
+        cond = listing.get("condition") or {}
+        price_obj = listing.get("price") or {}
+        is_buybox = listing.get("isBuyBoxWinner")
+
+        logger.debug(
+            "MERCHANT INSPECTION: m_info=%r m_id=%r (target=%r match=%s) name=%r cond=%r price=%r is_buybox=%s",
+            merchant_info,
+            m_id,
+            target_merchant_id,
+            m_id == target_merchant_id,
+            m_name,
+            cond,
+            price_obj,
+            is_buybox,
+        )
+
         if m_id == target_merchant_id:
             merchant_found = True
-            price_obj = listing.get("price") or {}
             price_text = _format_egp_price(price_obj.get("money"))
             if price_text != "Not found":
                 val = _parse_price_val(price_text)
