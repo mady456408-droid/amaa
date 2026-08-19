@@ -30,6 +30,9 @@ SETTING_AI_PROVIDER = "ai_provider"
 SETTING_CHATGPT_REWRITE_ENABLED = "chatgpt_rewrite_enabled"
 SETTING_CHATGPT_SKIP_CACHE = "chatgpt_skip_cache"
 SETTING_CHATGPT_REWRITE_PROMPT = "chatgpt_rewrite_prompt"
+SETTING_AUTO_PRICE_MONITOR_ENABLED = "auto_price_monitor_enabled"
+SETTING_PRICE_MONITOR_INTERVAL_MIN = "price_monitor_interval_min"
+SETTING_LAST_PRICE_CHECK_TIME = "last_price_check_time"
 
 
 class Database:
@@ -288,6 +291,62 @@ class Database:
                 )
                 conn.execute("DROP TABLE gemini_rewrite_cache")
                 conn.execute("ALTER TABLE gemini_rewrite_cache_new RENAME TO gemini_rewrite_cache")
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS price_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tracked_product_id INTEGER,
+                    asin TEXT NOT NULL,
+                    price TEXT,
+                    price_value REAL,
+                    list_price TEXT,
+                    list_price_value REAL,
+                    coupon TEXT,
+                    final_price REAL NOT NULL,
+                    seller_name TEXT,
+                    availability TEXT,
+                    marketplace TEXT DEFAULT 'www.amazon.eg',
+                    price_change_amount REAL DEFAULT 0,
+                    price_change_percent REAL DEFAULT 0,
+                    change_type TEXT,
+                    recorded_at TEXT NOT NULL,
+                    price_source TEXT DEFAULT 'creators_api',
+                    seller_type TEXT DEFAULT 'NEW_AMAZON',
+                    seller_id TEXT DEFAULT 'A1ZVRGNO5AYLOV'
+                )
+                """
+            )
+
+            # Migration: Ensure seller_type and seller_id exist in price_history
+            ph_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(price_history)").fetchall()
+            }
+            if "seller_type" not in ph_cols:
+                conn.execute("ALTER TABLE price_history ADD COLUMN seller_type TEXT DEFAULT 'NEW_AMAZON'")
+            if "seller_id" not in ph_cols:
+                conn.execute("ALTER TABLE price_history ADD COLUMN seller_id TEXT DEFAULT 'A1ZVRGNO5AYLOV'")
+
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_price_history_asin_seller_at "
+                "ON price_history (asin, seller_type, recorded_at DESC)"
+            )
+
+            # Migration: Ensure availability and last valid price columns in published_products
+            published_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(published_products)").fetchall()
+            }
+            for col, col_type in (
+                ("new_availability", "TEXT DEFAULT 'AVAILABLE'"),
+                ("new_last_valid_price", "REAL"),
+                ("resale_availability", "TEXT DEFAULT 'OUT_OF_STOCK'"),
+                ("resale_last_valid_price", "REAL"),
+            ):
+                if col not in published_cols:
+                    conn.execute(f"ALTER TABLE published_products ADD COLUMN {col} {col_type}")
+
             conn.commit()
 
     def seed_from_env(self, source_channel_id: int, destination_channel_id: int) -> None:
@@ -847,6 +906,352 @@ class Database:
                         published_currency,
                         published_id,
                     ),
+                )
+            conn.commit()
+
+    # --- Price History & Auto Monitoring Methods ---
+
+    def get_auto_price_monitor_enabled(self) -> bool:
+        val = self.get_setting(SETTING_AUTO_PRICE_MONITOR_ENABLED)
+        return val == "1" if val is not None else True
+
+    def set_auto_price_monitor_enabled(self, enabled: bool) -> None:
+        self.set_setting(SETTING_AUTO_PRICE_MONITOR_ENABLED, "1" if enabled else "0")
+
+    def get_price_monitor_interval_min(self) -> int:
+        val = self.get_setting(SETTING_PRICE_MONITOR_INTERVAL_MIN)
+        if not val:
+            return 30
+        try:
+            return max(1, int(val))
+        except ValueError:
+            return 30
+
+    def set_price_monitor_interval_min(self, minutes: int) -> None:
+        clamped = max(1, minutes)
+        self.set_setting(SETTING_PRICE_MONITOR_INTERVAL_MIN, str(clamped))
+
+    def get_last_price_check_time(self) -> str | None:
+        return self.get_setting(SETTING_LAST_PRICE_CHECK_TIME)
+
+    def set_last_price_check_time(self, iso_time: str | None = None) -> None:
+        now = iso_time or datetime.now(timezone.utc).isoformat()
+        self.set_setting(SETTING_LAST_PRICE_CHECK_TIME, now)
+
+    def add_price_history_record(
+        self,
+        asin: str,
+        price: str | None,
+        price_value: float | None,
+        final_price: float,
+        *,
+        tracked_product_id: int | None = None,
+        list_price: str | None = None,
+        list_price_value: float | None = None,
+        coupon: str | None = None,
+        seller_name: str | None = None,
+        availability: str | None = None,
+        marketplace: str = "www.amazon.eg",
+        price_change_amount: float = 0.0,
+        price_change_percent: float = 0.0,
+        change_type: str = "initial",
+        price_source: str = "creators_api",
+        seller_type: str = "NEW_AMAZON",
+        seller_id: str = "A1ZVRGNO5AYLOV",
+        recorded_at: str | None = None,
+    ) -> int:
+        now = recorded_at or datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO price_history
+                    (tracked_product_id, asin, price, price_value, list_price,
+                     list_price_value, coupon, final_price, seller_name, availability,
+                     marketplace, price_change_amount, price_change_percent,
+                     change_type, recorded_at, price_source, seller_type, seller_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    tracked_product_id,
+                    asin.upper(),
+                    price,
+                    price_value,
+                    list_price,
+                    list_price_value,
+                    coupon,
+                    final_price,
+                    seller_name,
+                    availability,
+                    marketplace,
+                    price_change_amount,
+                    price_change_percent,
+                    change_type,
+                    now,
+                    price_source,
+                    seller_type,
+                    seller_id,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def has_price_history(self, asin: str, seller_type: str = "NEW_AMAZON") -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM price_history WHERE asin = ? AND seller_type = ? LIMIT 1",
+                (asin.upper(), seller_type),
+            ).fetchone()
+        return bool(row)
+
+    def get_latest_price_history(self, asin: str, seller_type: str = "NEW_AMAZON") -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM price_history
+                WHERE asin = ? AND seller_type = ?
+                ORDER BY recorded_at DESC, id DESC
+                LIMIT 1
+                """,
+                (asin.upper(), seller_type),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_bulk_latest_price_history(self, asins: list[str]) -> dict[tuple[str, str], dict[str, Any]]:
+        """
+        Fetch latest price history for all given ASINs in a single query.
+        Returns map: (asin.upper(), seller_type) -> history dict
+        """
+        if not asins:
+            return {}
+
+        asins_upper = [a.upper() for a in asins]
+        out: dict[tuple[str, str], dict[str, Any]] = {}
+        with self._connect() as conn:
+            for i in range(0, len(asins_upper), 500):
+                chunk = asins_upper[i : i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                query = f"""
+                    SELECT ph.*
+                    FROM price_history ph
+                    INNER JOIN (
+                        SELECT asin, seller_type, MAX(id) as max_id
+                        FROM price_history
+                        WHERE asin IN ({placeholders})
+                        GROUP BY asin, seller_type
+                    ) latest ON ph.id = latest.max_id
+                """
+                rows = conn.execute(query, chunk).fetchall()
+                for r in rows:
+                    d = dict(r)
+                    out[(d["asin"].upper(), d["seller_type"])] = d
+        return out
+
+    def execute_bulk_monitoring_db_updates(
+        self,
+        product_check_updates: list[tuple[float, int]],
+        seller_state_updates: list[tuple[str, float | None, int, str]],
+        history_records: list[dict[str, Any]],
+    ) -> None:
+        """
+        Execute all state updates and history insertions in a single atomic transaction.
+        If any query fails, the entire transaction rolls back cleanly.
+        """
+        with self._connect() as conn:
+            for curr_final, product_id in product_check_updates:
+                conn.execute(
+                    "UPDATE published_products SET last_price_check = ? WHERE id = ?",
+                    (curr_final, product_id),
+                )
+
+            for availability, last_valid_price, product_id, seller_type in seller_state_updates:
+                prefix = "new" if seller_type == "NEW_AMAZON" else "resale"
+                if last_valid_price is not None:
+                    conn.execute(
+                        f"""
+                        UPDATE published_products
+                        SET {prefix}_availability = ?, {prefix}_last_valid_price = ?
+                        WHERE id = ?
+                        """,
+                        (availability, last_valid_price, product_id),
+                    )
+                else:
+                    conn.execute(
+                        f"""
+                        UPDATE published_products
+                        SET {prefix}_availability = ?
+                        WHERE id = ?
+                        """,
+                        (availability, product_id),
+                    )
+
+            for rec in history_records:
+                now = rec.get("recorded_at") or datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    """
+                    INSERT INTO price_history
+                        (tracked_product_id, asin, price, price_value, list_price,
+                         list_price_value, coupon, final_price, seller_name, availability,
+                         marketplace, price_change_amount, price_change_percent,
+                         change_type, recorded_at, price_source, seller_type, seller_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rec.get("tracked_product_id"),
+                        rec["asin"].upper(),
+                        rec.get("price"),
+                        rec.get("price_value"),
+                        rec.get("list_price"),
+                        rec.get("list_price_value"),
+                        rec.get("coupon"),
+                        rec["final_price"],
+                        rec.get("seller_name"),
+                        rec.get("availability"),
+                        rec.get("marketplace", "www.amazon.eg"),
+                        rec.get("price_change_amount", 0.0),
+                        rec.get("price_change_percent", 0.0),
+                        rec.get("change_type", "initial"),
+                        now,
+                        rec.get("price_source", "creators_api"),
+                        rec.get("seller_type", "NEW_AMAZON"),
+                        rec.get("seller_id", "A1ZVRGNO5AYLOV"),
+                    ),
+                )
+
+            conn.commit()
+
+    def get_price_history_records(self, asin: str, seller_type: str = "NEW_AMAZON", limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM price_history
+                WHERE asin = ? AND seller_type = ?
+                ORDER BY recorded_at DESC, id DESC
+                LIMIT ?
+                """,
+                (asin.upper(), seller_type, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_price_history_stats(
+        self,
+        asin: str,
+        seller_type: str = "NEW_AMAZON",
+        current_override_price: float | None = None,
+    ) -> dict[str, Any]:
+        asin_upper = asin.upper()
+        records = self.get_price_history_records(asin_upper, seller_type=seller_type, limit=500)
+        override_val = float(current_override_price) if (current_override_price is not None and current_override_price > 0) else None
+
+        valid_records = [r for r in records if r.get("final_price") is not None and float(r["final_price"]) > 0]
+
+        if not valid_records:
+            if override_val is not None:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                return {
+                    "has_data": True,
+                    "total_records": len(records) + 1,
+                    "total_changes": 1,
+                    "current_record": None,
+                    "previous_record": None,
+                    "current_price": override_val,
+                    "previous_price": override_val,
+                    "lowest_price": override_val,
+                    "lowest_recorded_at": now_iso,
+                    "highest_price": override_val,
+                    "highest_recorded_at": now_iso,
+                    "average_price": override_val,
+                    "price_change_amount": 0.0,
+                    "price_change_percent": 0.0,
+                    "is_lowest": True,
+                    "diff_from_lowest": 0.0,
+                }
+            return {
+                "has_data": False,
+                "total_records": len(records),
+                "total_changes": 0,
+                "current_price": None,
+                "previous_price": None,
+                "lowest_price": None,
+                "lowest_recorded_at": None,
+                "highest_price": None,
+                "highest_recorded_at": None,
+                "average_price": None,
+                "price_change_amount": 0.0,
+                "price_change_percent": 0.0,
+                "is_lowest": False,
+                "diff_from_lowest": 0.0,
+            }
+
+        lowest_rec = min(valid_records, key=lambda r: float(r["final_price"]))
+        highest_rec = max(valid_records, key=lambda r: float(r["final_price"]))
+
+        lowest_price = float(lowest_rec["final_price"])
+        highest_price = float(highest_rec["final_price"])
+
+        if override_val is not None:
+            lowest_price = min(lowest_price, override_val)
+            highest_price = max(highest_price, override_val)
+
+        latest = records[0]
+        current_final = override_val if override_val is not None else float(latest["final_price"])
+        prev_final = float(records[1]["final_price"]) if len(records) > 1 else current_final
+
+        avg_prices = [float(r["final_price"]) for r in valid_records]
+        if override_val is not None:
+            avg_prices.append(override_val)
+        avg_price = sum(avg_prices) / len(avg_prices)
+
+        total_changes = sum(1 for r in records if r.get("change_type") and r["change_type"] != "initial")
+        change_amount = current_final - prev_final
+        change_percent = ((change_amount / prev_final) * 100.0) if prev_final > 0 else 0.0
+        diff_lowest = current_final - lowest_price
+        is_lowest = abs(current_final - lowest_price) < 0.01
+
+        return {
+            "has_data": True,
+            "total_records": len(records) + (1 if override_val else 0),
+            "total_changes": total_changes,
+            "current_record": latest,
+            "previous_record": records[1] if len(records) > 1 else None,
+            "current_price": current_final,
+            "previous_price": prev_final,
+            "lowest_price": lowest_price,
+            "lowest_recorded_at": lowest_rec.get("recorded_at"),
+            "highest_price": highest_price,
+            "highest_recorded_at": highest_rec.get("recorded_at"),
+            "average_price": avg_price,
+            "price_change_amount": change_amount,
+            "price_change_percent": change_percent,
+            "is_lowest": is_lowest,
+            "diff_from_lowest": diff_lowest,
+        }
+
+    def update_published_product_seller_state(
+        self,
+        published_id: int,
+        seller_type: str,
+        availability: str,
+        last_valid_price: float | None,
+    ) -> None:
+        prefix = "new" if seller_type == "NEW_AMAZON" else "resale"
+        with self._connect() as conn:
+            if last_valid_price is not None:
+                conn.execute(
+                    f"""
+                    UPDATE published_products
+                    SET {prefix}_availability = ?, {prefix}_last_valid_price = ?
+                    WHERE id = ?
+                    """,
+                    (availability, last_valid_price, published_id),
+                )
+            else:
+                conn.execute(
+                    f"""
+                    UPDATE published_products
+                    SET {prefix}_availability = ?
+                    WHERE id = ?
+                    """,
+                    (availability, published_id),
                 )
             conn.commit()
 

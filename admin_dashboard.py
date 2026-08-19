@@ -263,25 +263,93 @@ def _main_keyboard(paused: bool, telethon_connected: bool = True) -> InlineKeybo
     return InlineKeyboardMarkup(rows)
 
 
-def _price_monitor_keyboard(db: Database) -> InlineKeyboardMarkup:
+def _price_monitor_menu_text(db: Database) -> str:
+    auto_enabled = db.get_auto_price_monitor_enabled()
+    interval_min = db.get_price_monitor_interval_min()
     min_drop = db.get_min_price_drop()
+    last_check = db.get_last_price_check_time()
+
+    status_str = "🟢 Enabled" if auto_enabled else "🔴 Disabled"
+
+    if interval_min >= 60:
+        interval_str = f"Every {interval_min // 60} hour(s)"
+    else:
+        interval_str = f"Every {interval_min} minutes"
+
+    if last_check:
+        try:
+            dt = datetime.fromisoformat(last_check.replace("Z", "+00:00"))
+            last_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            next_dt = dt + timedelta(minutes=interval_min)
+            next_str = next_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            last_str = last_check[:19]
+            next_str = "Scheduled"
+    else:
+        last_str = "Never"
+        next_str = "Pending initial check"
+
+    return (
+        f"📊 <b>Price Monitoring Dashboard</b>\n\n"
+        f"Status: <b>{status_str}</b>\n"
+        f"Interval: <b>{interval_str}</b>\n"
+        f"Minimum Drop: <b>{min_drop} EGP</b>\n"
+        f"Last Check: <code>{last_str}</code>\n"
+        f"Next Check: <code>{next_str}</code>\n\n"
+        "Monitors NEW Amazon seller (A1ZVRGNO5AYLOV) and Amazon Resale (A2N2MP47XAP1MK) independently."
+    )
+
+
+def _price_monitor_keyboard(db: Database) -> InlineKeyboardMarkup:
+    auto_enabled = db.get_auto_price_monitor_enabled()
+    toggle_btn = (
+        InlineKeyboardButton("🔴 Disable Auto", callback_data="adm:price:auto_off")
+        if auto_enabled
+        else InlineKeyboardButton("🟢 Enable Auto", callback_data="adm:price:auto_on")
+    )
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(
-                    "📉 Check Price Drops",
-                    callback_data=CB_PRICE_CHECK,
-                ),
+                InlineKeyboardButton("🔄 Check Now", callback_data=CB_PRICE_CHECK),
+                toggle_btn,
             ],
             [
-                InlineKeyboardButton(
-                    f"⚙️ Minimum Price Drop: {min_drop} EGP",
-                    callback_data=CB_MIN_PRICE_DROP_SET,
-                ),
+                InlineKeyboardButton("⏱ Change Interval", callback_data="adm:price:interval_menu"),
+                InlineKeyboardButton("📊 View Price History", callback_data="ph_list"),
+            ],
+            [
+                InlineKeyboardButton("⚙️ Minimum Price Drop", callback_data=CB_MIN_PRICE_DROP_SET),
             ],
             [InlineKeyboardButton("« Back", callback_data=CB_MAIN)],
         ]
     )
+
+
+def _interval_selection_keyboard(current_min: int) -> InlineKeyboardMarkup:
+    options = [3, 5, 7, 10, 15, 30, 60, 120, 360, 720, 1440]
+    labels = {
+        3: "3 mins",
+        5: "5 mins",
+        7: "7 mins",
+        10: "10 mins",
+        15: "15 mins",
+        30: "30 mins",
+        60: "1 hour",
+        120: "2 hours",
+        360: "6 hours",
+        720: "12 hours",
+        1440: "24 hours",
+    }
+    buttons = []
+    for opt in options:
+        lbl = f"✓ {labels[opt]}" if opt == current_min else labels[opt]
+        buttons.append(InlineKeyboardButton(lbl, callback_data=f"adm:price:interval_set:{opt}"))
+
+    rows = []
+    for i in range(0, len(buttons), 2):
+        rows.append(buttons[i:i+2])
+    rows.append([InlineKeyboardButton("« Back", callback_data=CB_PRICE_MONITOR)])
+    return InlineKeyboardMarkup(rows)
 
 
 def _min_price_drop_keyboard(current: int) -> InlineKeyboardMarkup:
@@ -1495,8 +1563,50 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if data == CB_PRICE_MONITOR:
         await _safe_edit_message_text(
             query,
-            "📊 <b>Price Monitoring</b>\n\n"
-            "Check published products for price drops.",
+            _price_monitor_menu_text(db),
+            reply_markup=_price_monitor_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == "adm:price:auto_on":
+        db.set_auto_price_monitor_enabled(True)
+        await _safe_edit_message_text(
+            query,
+            _price_monitor_menu_text(db),
+            reply_markup=_price_monitor_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == "adm:price:auto_off":
+        db.set_auto_price_monitor_enabled(False)
+        await _safe_edit_message_text(
+            query,
+            _price_monitor_menu_text(db),
+            reply_markup=_price_monitor_keyboard(db),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data == "adm:price:interval_menu":
+        current_min = db.get_price_monitor_interval_min()
+        await _safe_edit_message_text(
+            query,
+            f"⏱ <b>Select Check Interval</b>\n\n"
+            f"Current interval: <b>Every {current_min} minutes</b>\n\n"
+            "Choose how often the bot should automatically check active tracked products for price drops and restocks.",
+            reply_markup=_interval_selection_keyboard(current_min),
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+
+    if data.startswith("adm:price:interval_set:"):
+        minutes = int(data.replace("adm:price:interval_set:", ""))
+        db.set_price_monitor_interval_min(minutes)
+        await _safe_edit_message_text(
+            query,
+            _price_monitor_menu_text(db),
             reply_markup=_price_monitor_keyboard(db),
             parse_mode="HTML",
         )

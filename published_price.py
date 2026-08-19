@@ -82,3 +82,278 @@ def drop_index_emoji(index: int) -> str:
     if 1 <= index <= len(_NUMBER_EMOJIS):
         return _NUMBER_EMOJIS[index - 1]
     return f"{index}."
+
+
+def format_detailed_price_drop_message(
+    *,
+    title: str,
+    current_price: float,
+    previous_price: float,
+    currency: str = "EGP",
+    stats: dict[str, Any] | None = None,
+    product_url: str | None = None,
+    coupon: str | None = None,
+    seller: str | None = None,
+) -> str:
+    savings = previous_price - current_price
+    drop_pct = (savings / previous_price * 100.0) if previous_price > 0 else 0.0
+
+    curr_fmt = format_currency_amount(current_price, currency)
+    prev_fmt = format_currency_amount(previous_price, currency)
+    savings_fmt = format_currency_amount(savings, currency)
+
+    if drop_pct >= 10.0:
+        header = "🔥 <b>تخفيض قوي!</b>\n"
+    elif drop_pct >= 5.0:
+        header = "📉 <b>تخفيض ملحوظ!</b>\n"
+    else:
+        header = "📉 <b>تحديث السعر</b>\n"
+
+    lines = [
+        header,
+        f"📦 <b>{short_title(title, 80)}</b>\n",
+        f"💰 <b>السعر الحالي:</b> {curr_fmt}",
+        f"📉 <b>كان:</b> {prev_fmt}",
+        f"💵 <b>وفرت:</b> {savings_fmt}",
+        f"📊 <b>انخفاض:</b> {drop_pct:.1f}%\n",
+    ]
+
+    if coupon:
+        lines.append(f"🎟 <b>كوبون:</b> {coupon}")
+    if seller:
+        lines.append(f"🏪 <b>البائع:</b> {seller}")
+
+    if stats and stats.get("has_data"):
+        lowest = stats["lowest_price"]
+        highest = stats["highest_price"]
+        avg = stats["average_price"]
+
+        lowest_fmt = format_currency_amount(lowest, currency)
+        highest_fmt = format_currency_amount(highest, currency)
+        avg_fmt = format_currency_amount(avg, currency)
+
+        lines.extend([
+            "📈 <b>سجل السعر:</b>",
+            f"• أعلى سعر مسجل: {highest_fmt}",
+            f"• متوسط السعر: {avg_fmt}",
+            f"• أقل سعر مسجل: {lowest_fmt}\n",
+        ])
+
+        if stats.get("is_lowest"):
+            lines.append("🏷️ <b>تنويه:</b> هذا السعر هو أقل سعر مسجل بالمرصد حتى الآن.")
+
+    if product_url:
+        lines.extend(["\n🔗 <b>اشترِ من هنا:</b>", product_url])
+
+    return "\n".join(lines)
+
+
+def generate_price_chart_image(
+    asin: str,
+    title: str,
+    records: list[dict[str, Any]],
+) -> str | None:
+    if not records or len(records) < 2:
+        return None
+
+    try:
+        import os
+        import tempfile
+        from datetime import datetime
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        sorted_recs = sorted(records, key=lambda r: r.get("recorded_at") or "")
+        dates = []
+        prices = []
+        for r in sorted_recs:
+            raw_dt = r.get("recorded_at") or ""
+            try:
+                dt = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
+                dates.append(dt.strftime("%d %b %H:%M"))
+            except Exception:
+                dates.append(raw_dt[:10] if raw_dt else "")
+            prices.append(float(r.get("final_price") or 0.0))
+
+        if not prices:
+            return None
+
+        fig, ax = plt.subplots(figsize=(8, 4.5), dpi=150)
+        fig.patch.set_facecolor("#1e1e2e")
+        ax.set_facecolor("#1e1e2e")
+
+        ax.plot(dates, prices, color="#89b4fa", linewidth=2.5, marker="o", markersize=5, label="Price")
+
+        min_idx = prices.index(min(prices))
+        max_idx = prices.index(max(prices))
+        curr_idx = len(prices) - 1
+
+        ax.scatter([dates[min_idx]], [prices[min_idx]], color="#a6e3a1", s=100, zorder=5, label=f"Lowest ({prices[min_idx]:,.0f})")
+        ax.scatter([dates[max_idx]], [prices[max_idx]], color="#f38ba8", s=100, zorder=5, label=f"Highest ({prices[max_idx]:,.0f})")
+        ax.scatter([dates[curr_idx]], [prices[curr_idx]], color="#f9e2af", s=100, zorder=5, label=f"Current ({prices[curr_idx]:,.0f})")
+
+        ax.set_title(f"Price History — {short_title(title, 40)}", color="#cdd6f4", fontsize=12, pad=12, fontweight="bold")
+        ax.set_ylabel("Price (EGP)", color="#cdd6f4", fontsize=10)
+        ax.tick_params(colors="#bac2de", labelsize=8)
+        plt.xticks(rotation=30, ha="right")
+        ax.grid(True, color="#45475a", linestyle="--", alpha=0.5)
+        ax.legend(facecolor="#313244", edgecolor="#45475a", labelcolor="#cdd6f4", fontsize=8)
+
+        for spine in ax.spines.values():
+            spine.set_color("#45475a")
+
+        plt.tight_layout()
+
+        out_dir = tempfile.gettempdir()
+        out_path = os.path.join(out_dir, f"chart_{asin}_{int(datetime.now().timestamp())}.png")
+        fig.savefig(out_path, facecolor=fig.get_facecolor(), edgecolor="none")
+        plt.close(fig)
+        return out_path
+    except Exception:
+        return None
+
+
+def format_restock_message(
+    *,
+    title: str,
+    current_price: float,
+    previous_price: float,
+    currency: str = "EGP",
+    stats: dict[str, Any] | None = None,
+    product_url: str | None = None,
+) -> str:
+    savings = previous_price - current_price
+    drop_pct = (savings / previous_price * 100.0) if previous_price > 0 else 0.0
+
+    curr_fmt = format_currency_amount(current_price, currency)
+    prev_fmt = format_currency_amount(previous_price, currency)
+    savings_fmt = format_currency_amount(savings, currency)
+
+    lines = [
+        "🔄 <b>المنتج رجع متاح!</b>\n",
+        f"📦 <b>{short_title(title, 80)}</b>\n",
+        f"💰 <b>السعر الحالي:</b> {curr_fmt}",
+        f"📉 <b>آخر سعر قبل نفاد المخزون:</b> {prev_fmt}",
+    ]
+
+    if savings > 0:
+        lines.extend([
+            f"💵 <b>وفرت:</b> {savings_fmt}",
+            f"📊 <b>انخفاض:</b> {drop_pct:.1f}%\n",
+        ])
+    else:
+        lines.append("")
+
+    if stats and stats.get("has_data") and stats.get("is_lowest"):
+        lines.append("🏆 <b>أقل سعر مسجل حتى الآن!</b>")
+
+    if product_url:
+        lines.extend(["\n🔗 <b>اطلبه من هنا:</b>", product_url])
+
+    return "\n".join(lines)
+
+
+def format_resale_price_drop_message(
+    *,
+    title: str,
+    current_price: float,
+    previous_price: float,
+    currency: str = "EGP",
+    stats: dict[str, Any] | None = None,
+    product_url: str | None = None,
+) -> str:
+    savings = previous_price - current_price
+    drop_pct = (savings / previous_price * 100.0) if previous_price > 0 else 0.0
+
+    curr_fmt = format_currency_amount(current_price, currency)
+    prev_fmt = format_currency_amount(previous_price, currency)
+    savings_fmt = format_currency_amount(savings, currency)
+
+    if drop_pct >= 10.0:
+        header = "🔥 <b>Amazon Resale — تخفيض قوي!</b>\n"
+    elif drop_pct >= 5.0:
+        header = "♻️ <b>Amazon Resale — تخفيض ملحوظ!</b>\n"
+    else:
+        header = "♻️ <b>Amazon Resale — تحديث السعر</b>\n"
+
+    lines = [
+        header,
+        f"📦 <b>{short_title(title, 80)}</b>\n",
+        f"💰 <b>السعر الحالي:</b> {curr_fmt}",
+        f"📉 <b>كان:</b> {prev_fmt}",
+        f"💵 <b>وفرت:</b> {savings_fmt}",
+        f"📊 <b>انخفاض:</b> {drop_pct:.1f}%",
+        "📦 <b>الحالة:</b> Used / Amazon Resale\n",
+    ]
+
+    if stats and stats.get("has_data"):
+        lowest = stats["lowest_price"]
+        highest = stats["highest_price"]
+        avg = stats["average_price"]
+
+        lowest_fmt = format_currency_amount(lowest, currency)
+        highest_fmt = format_currency_amount(highest, currency)
+        avg_fmt = format_currency_amount(avg, currency)
+
+        lines.extend([
+            "📈 <b>سجل Amazon Resale:</b>",
+            f"• أعلى سعر مسجل: {highest_fmt}",
+            f"• متوسط السعر: {avg_fmt}",
+            f"• أقل سعر مسجل: {lowest_fmt}\n",
+        ])
+
+        if stats.get("is_lowest"):
+            lines.append("🏷️ <b>تنويه:</b> هذا السعر هو أقل سعر مسجل بالمرصد حتى الآن.")
+
+    if product_url:
+        lines.extend(["\n🔗 <b>شوف العرض:</b>", product_url])
+
+    return "\n".join(lines)
+
+
+def format_resale_restock_message(
+    *,
+    title: str,
+    current_price: float,
+    previous_price: float,
+    currency: str = "EGP",
+    stats: dict[str, Any] | None = None,
+    product_url: str | None = None,
+) -> str:
+    curr_fmt = format_currency_amount(current_price, currency)
+
+    if previous_price > 0:
+        savings = previous_price - current_price
+        drop_pct = (savings / previous_price * 100.0) if previous_price > 0 else 0.0
+        prev_fmt = format_currency_amount(previous_price, currency)
+        savings_fmt = format_currency_amount(savings, currency)
+
+        lines = [
+            "♻️ <b>Amazon Resale رجع!</b>\n",
+            f"📦 <b>{short_title(title, 80)}</b>\n",
+            f"💰 <b>السعر الحالي:</b> {curr_fmt}",
+            f"📉 <b>آخر سعر:</b> {prev_fmt}",
+        ]
+        if savings > 0:
+            lines.extend([
+                f"💵 <b>وفرت:</b> {savings_fmt}",
+                f"📊 <b>انخفاض:</b> {drop_pct:.1f}%\n",
+            ])
+        else:
+            lines.append("📦 <b>الحالة:</b> Used / Amazon Resale\n")
+    else:
+        lines = [
+            "♻️ <b>Amazon Resale متاح!</b>\n",
+            f"📦 <b>{short_title(title, 80)}</b>\n",
+            f"💰 <b>سعر Amazon Resale الحالي:</b> {curr_fmt}",
+            "📦 <b>الحالة:</b> Used / Amazon Resale\n",
+        ]
+
+    if stats and stats.get("has_data") and stats.get("is_lowest"):
+        lines.append("🏷️ <b>تنويه:</b> هذا السعر هو أقل سعر مسجل بالمرصد حتى الآن.")
+
+    if product_url:
+        lines.extend(["\n🔗 <b>شوف العرض:</b>", product_url])
+
+    return "\n".join(lines)

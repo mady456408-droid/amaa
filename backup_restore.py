@@ -147,6 +147,20 @@ def restore_from_zip(zip_path: Path, root: Path | None = None) -> list[str]:
             logger.info("RESTORED: %s", norm)
 
     logger.info("RESTORE COMPLETE — %s file(s)", len(restored))
+    
+    # Log AI provider state after restore for debugging
+    try:
+        from database import Database
+        db = Database(str(root / Path(DATABASE_PATH).name))
+        provider = db.get_ai_provider()
+        gemini_enabled = db.get_gemini_enabled()
+        chatgpt_enabled = db.get_chatgpt_rewrite_enabled()
+        logger.info("AI PROVIDER AFTER RESTORE = %s", provider)
+        logger.info("GEMINI ENABLED AFTER RESTORE = %s", gemini_enabled)
+        logger.info("CHATGPT ENABLED AFTER RESTORE = %s", chatgpt_enabled)
+    except Exception:
+        logger.exception("Failed to read AI provider state after restore")
+    
     return restored
 
 

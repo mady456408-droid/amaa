@@ -7,7 +7,7 @@ from telegram import Message
 from telegram.ext import ApplicationBuilder, filters as tg_filters
 
 from admin_dashboard import build_admin_handlers, refresh_runtime_config
-from price_monitoring import build_price_monitoring_handlers
+from price_monitoring import build_price_monitoring_handlers, price_monitoring_scheduler_loop
 from amazon_scraper import BrowserManager
 from amazon_shortener import shorten_amazon_url
 from creators_api import init_creators_client, shutdown_creators_client
@@ -766,6 +766,11 @@ async def on_startup(application) -> None:
         max_size=DEDUP_MAX_SIZE,
     )
 
+    application.bot_data["price_monitoring_task"] = asyncio.create_task(
+        price_monitoring_scheduler_loop(application),
+        name="price-monitoring-scheduler",
+    )
+
     await start_telethon_listener(application)
 
     application.bot_data["ready"] = True
@@ -781,7 +786,7 @@ async def on_startup(application) -> None:
 async def on_shutdown(application) -> None:
     application.bot_data["ready"] = False
 
-    for key in ("worker_task", "approval_timeout_task"):
+    for key in ("worker_task", "approval_timeout_task", "price_monitoring_task"):
         task = application.bot_data.get(key)
         if task:
             task.cancel()

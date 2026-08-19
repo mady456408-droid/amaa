@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -293,6 +294,7 @@ class NormalizedItem:
     list_price: str | None = None
     prime_exclusive: bool = False
     seller_name: str | None = None
+    raw_listings: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -576,7 +578,18 @@ def normalize_item(raw: dict[str, Any]) -> NormalizedItem | None:
         list_price=list_price,
         prime_exclusive=prime_exclusive,
         seller_name=seller_name,
+        raw_listings=listings,
     )
+
+
+ASIN_PATTERN = re.compile(r"^[0-9]{9}[0-9X]|[A-Z][A-Z0-9]{9}$", re.IGNORECASE)
+
+
+def is_valid_asin(asin: str | None) -> bool:
+    if not asin:
+        return False
+    clean = asin.strip().upper()
+    return len(clean) == 10 and bool(ASIN_PATTERN.match(clean))
 
 
 @dataclass
@@ -629,10 +642,14 @@ class CreatorsClient:
         """
         if not asins:
             return {}
-        if len(asins) > 10:
+
+        normalized_asins = [a.strip().upper() for a in asins if is_valid_asin(a)]
+        if not normalized_asins:
+            return {}
+
+        if len(normalized_asins) > 10:
             raise ValueError("Creators API accepts at most 10 ASINs per request")
 
-        normalized_asins = [a.strip().upper() for a in asins]
         results: dict[str, NormalizedItem] = {}
         missing: list[str] = []
 
