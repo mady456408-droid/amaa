@@ -203,6 +203,7 @@ class Database:
                 ("last_checked_at", "TEXT"),
                 ("destination_id", "INTEGER"),
                 ("seller_type", "TEXT NOT NULL DEFAULT 'NEW_AMAZON'"),
+                ("image_path", "TEXT"),
             ):
                 if col not in published_cols:
                     conn.execute(f"ALTER TABLE published_products ADD COLUMN {col} {col_type}")
@@ -839,6 +840,7 @@ class Database:
         published_list_price_value: float | None = None,
         published_currency: str | None = None,
         seller_type: str = "NEW_AMAZON",
+        image_path: str | None = None,
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
@@ -847,8 +849,8 @@ class Database:
                 INSERT INTO published_products
                     (asin, title, source_channel_id, destination_message_id, published_at,
                      destination_id, published_price, published_price_value, published_list_price,
-                     published_list_price_value, published_currency, seller_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     published_list_price_value, published_currency, seller_type, image_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     asin.upper(),
@@ -863,6 +865,7 @@ class Database:
                     published_list_price_value,
                     published_currency,
                     seller_type,
+                    image_path,
                 ),
             )
             conn.commit()
@@ -938,6 +941,7 @@ class Database:
         published_list_price_value: float | None,
         published_currency: str | None,
         seller_type: str | None = None,
+        image_path: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
@@ -947,6 +951,7 @@ class Database:
             ).fetchone()
 
             stype = seller_type or (dict(current).get("seller_type") if current else "NEW_AMAZON")
+            img = image_path or (dict(current).get("image_path") if current else None)
 
             if current:
                 conn.execute(
@@ -966,7 +971,8 @@ class Database:
                         published_list_price = ?,
                         published_list_price_value = ?,
                         published_currency = ?,
-                        seller_type = ?
+                        seller_type = ?,
+                        image_path = ?
                     WHERE id = ?
                     """,
                     (
@@ -981,6 +987,7 @@ class Database:
                         published_list_price_value,
                         published_currency,
                         stype,
+                        img,
                         published_id,
                     ),
                 )

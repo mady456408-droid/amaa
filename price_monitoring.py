@@ -17,10 +17,11 @@ from telegram.ext import CallbackQueryHandler, ContextTypes
 from ai_caption import build_product_caption
 from ai_rewriter import rewrite_caption
 from amazon_shortener import shorten_amazon_url
-from config import ADMIN_USER_IDS, AMAZON_DOMAIN
+from config import ADMIN_USER_IDS, AMAZON_DOMAIN, FRAME_PRODUCT_IMAGES
 from coupon_price import coupon_apply_kwargs_from_product, parse_price_number
 from creators_api import (
     AMAZON_RESALE_SELLER_ID,
+    DRAFT_PROFILE,
     NEW_AMAZON_SELLER_ID,
     PRICE_DROP_PROFILE,
     CreatorsAPIError,
@@ -32,9 +33,16 @@ from creators_api import (
 )
 from database import Database, compute_reference_price
 from file_cleanup import cleanup_files
+from image_processor import apply_frame_creators_product
 from inline_buttons import build_inline_keyboard
 from link_resolver import build_clean_url, resolve_asin_from_input
-from product_fetcher import fetch_product, resolve_display_url
+from product_fetcher import (
+    _download_best_amazon_image,
+    _require_screenshot,
+    fetch_product,
+    resolve_display_url,
+)
+from telegram_publisher import build_resale_caption
 from published_price import (
     drop_index_emoji,
     extract_published_price_fields,
@@ -1346,71 +1354,162 @@ async def republish_published_product(application: Any, published_id: int) -> st
     asin = row["asin"]
     seller_type = row.get("seller_type") or "NEW_AMAZON"
     merchant_id = AMAZON_RESALE_SELLER_ID if seller_type == "AMAZON_RESALE" else NEW_AMAZON_SELLER_ID
-
-    if seller_type == "AMAZON_RESALE":
-        logger.info("RESALE REPUBLISH START published_id=%s asin=%s merchant_id=%s", published_id, asin, merchant_id)
-    else:
-        logger.info("NEW REPUBLISH START published_id=%s asin=%s merchant_id=%s", published_id, asin, merchant_id)
-
     clean_url = build_clean_url(asin, AMAZON_DOMAIN, merchant_id=merchant_id if seller_type == "AMAZON_RESALE" else None)
     scrape_key = f"republish_{published_id}_{asin}"
     coupon_enabled = db.get_coupon_detection_enabled()
-
     temp_files: list[str] = []
-    try:
-        product = await fetch_product(
-            db,
-            browser,
-            asin,
-            clean_url,
-            scrape_key,
-            coupon_enabled=coupon_enabled,
-            seller_type=seller_type,
-        )
 
-        # STRICT SAFETY RULE: Do NOT fallback across seller types
-        if product.get("seller_offer_available") is False or product.get("price") == "Not found":
-            if seller_type == "AMAZON_RESALE":
+    try:
+        if seller_type == "AMAZON_RESALE":
+            logger.info("RESALE REPUBLISH START published_id=%s asin=%s merchant_id=%s", published_id, asin, merchant_id)
+
+            # 1. Fetch ONLY the current Resale offer via Creators API (DO NOT check NEW Amazon or run Playwright)
+            client = get_creators_client()
+            status = "MISSING_MERCHANT"
+            p_text, p_val, l_text, l_val, s_name, s_cond = None, None, None, None, None, None
+            item = None
+
+            if client and creators_api_configured():
+                logger.info(
+                    "RESALE FETCH START\n"
+                    "  asin=%s\n"
+                    "  seller_type=AMAZON_RESALE\n"
+                    "  merchant_id=%s\n"
+                    "  source=CREATORS_API",
+                    asin.upper(),
+                    AMAZON_RESALE_SELLER_ID,
+                )
+                try:
+                    items = await client.get_items([asin], DRAFT_PROFILE, db=db, profile="draft")
+                    item = items.get(asin.upper())
+                    if item:
+                        status, p_text, p_val, l_text, l_val, s_name, s_cond = extract_seller_offer(item, "AMAZON_RESALE")
+                except Exception as exc:
+                    logger.warning("RESALE CREATORS API FAILED\n  error=%s", exc)
+
+            # 2. STRICT FAILURE CASE: If Resale offer is unavailable, ABORT IMMEDIATELY!
+            if status != "AVAILABLE" or not p_text or p_text == "Not found" or p_val is None:
                 logger.warning("RESALE OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin)
                 return "❌ Amazon Resale is currently unavailable"
+
+            logger.info(
+                "RESALE OFFER FOUND\n"
+                "  merchant_id=%s\n"
+                "  price=%s\n"
+                "  condition=%s\n"
+                "  availability=AVAILABLE",
+                AMAZON_RESALE_SELLER_ID,
+                p_text,
+                s_cond or "Used",
+            )
+            logger.info("RESALE FETCH SUCCESS\n  source=CREATORS_API")
+
+            # 3. Product Content: REUSE stored title & stored image from published product record!
+            stored_title = row.get("title") or (item.title if item and item.title != "Not found" else f"Amazon Product ({asin})")
+            stored_image = row.get("image_path")
+
+            display_url = resolve_display_url({"merchant_id": AMAZON_RESALE_SELLER_ID, "seller_type": "AMAZON_RESALE"}, clean_url)
+            logger.info("RESALE PUBLISH URL display_url=%s", display_url)
+            short_url = await shorten_amazon_url(display_url, db)
+            if short_url:
+                display_url = short_url
+
+            # 4. Resolve Image: REUSE stored image if available on disk; fall back to Creators API image download
+            image_path_to_use = None
+            if stored_image and os.path.exists(stored_image):
+                image_path_to_use = stored_image
             else:
+                img_url = item.image_url if item else db.get_creators_image_url(asin)
+                if img_url:
+                    base_path = f"{scrape_key}_img.png"
+                    if await _download_best_amazon_image(img_url, base_path, asin=asin, db=db):
+                        image_path_to_use = base_path
+                        temp_files.append(base_path)
+
+            if not image_path_to_use or not os.path.exists(image_path_to_use):
+                raise RuntimeError(f"No stored product image available for ASIN {asin}")
+
+            if FRAME_PRODUCT_IMAGES:
+                framed_path = apply_frame_creators_product(
+                    image_path_to_use,
+                    f"{scrape_key}_framed.png",
+                    title=stored_title,
+                    price=p_text,
+                    list_price=l_text,
+                    seller_name="Amazon Resale",
+                    seller_condition=s_cond,
+                )
+                final_image_path = _require_screenshot(framed_path, asin=asin)
+            else:
+                final_image_path = image_path_to_use
+
+            temp_files.append(final_image_path)
+
+            # 5. Build Resale Caption
+            caption = build_resale_caption(
+                title=stored_title,
+                price=p_text,
+                resale_url=display_url,
+                seller_condition=s_cond,
+            )
+
+            product = {
+                "asin": asin.upper(),
+                "title": stored_title,
+                "price": p_text,
+                "list_price": l_text,
+                "seller_name": "Amazon Resale",
+                "seller_condition": s_cond,
+                "seller_type": "AMAZON_RESALE",
+                "merchant_id": AMAZON_RESALE_SELLER_ID,
+                "screenshot": final_image_path,
+                "display_url": display_url,
+            }
+        else:
+            logger.info("NEW REPUBLISH START published_id=%s asin=%s merchant_id=%s", published_id, asin, merchant_id)
+            product = await fetch_product(
+                db,
+                browser,
+                asin,
+                clean_url,
+                scrape_key,
+                coupon_enabled=coupon_enabled,
+                seller_type=seller_type,
+            )
+
+            # STRICT SAFETY RULE: Do NOT fallback across seller types
+            if product.get("seller_offer_available") is False or product.get("price") == "Not found":
                 logger.warning("NEW OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin)
                 return "❌ NEW Amazon offer is currently unavailable"
 
-        if seller_type == "AMAZON_RESALE":
-            logger.info("RESALE OFFER FOUND merchant_id=%s price=%s availability=AVAILABLE", merchant_id, product["price"])
+            display_url = resolve_display_url(product, clean_url)
+            short_url = await shorten_amazon_url(display_url, db)
+            if short_url:
+                display_url = short_url
 
-        display_url = resolve_display_url(product, clean_url)
-        if seller_type == "AMAZON_RESALE":
-            logger.info("RESALE PUBLISH URL display_url=%s", display_url)
-
-        short_url = await shorten_amazon_url(display_url, db)
-        if short_url:
-            display_url = short_url
-
-        temp_files.append(product["screenshot"])
-        coupon = product.get("coupon") if coupon_enabled else None
-        coupon_kwargs = (
-            coupon_apply_kwargs_from_product(product) if coupon_enabled else {}
-        )
-
-        if product["title"] == "Not found":
-            caption = build_caption(
-                product["title"],
-                product["price"],
-                display_url,
-                coupon=coupon,
-                coupon_kwargs=coupon_kwargs,
+            temp_files.append(product["screenshot"])
+            coupon = product.get("coupon") if coupon_enabled else None
+            coupon_kwargs = (
+                coupon_apply_kwargs_from_product(product) if coupon_enabled else {}
             )
-        else:
-            caption = await build_product_caption(
-                db,
-                product["title"],
-                product["price"],
-                display_url,
-                coupon=coupon,
-                product=product,
-            )
+
+            if product["title"] == "Not found":
+                caption = build_caption(
+                    product["title"],
+                    product["price"],
+                    display_url,
+                    coupon=coupon,
+                    coupon_kwargs=coupon_kwargs,
+                )
+            else:
+                caption = await build_product_caption(
+                    db,
+                    product["title"],
+                    product["price"],
+                    display_url,
+                    coupon=coupon,
+                    product=product,
+                )
 
         # Apply AI rewrite if single product (skip for composite multi-product posts)
         asin_list = [a.strip() for a in asin.split(",") if a.strip()]
@@ -1492,6 +1591,7 @@ async def republish_published_product(application: Any, published_id: int) -> st
                     published_list_price_value=price_fields["published_list_price_value"],
                     published_currency=price_fields["published_currency"],
                     seller_type=seller_type,
+                    image_path=product.get("screenshot"),
                 )
                 db.update_published_product_price_check(published_id, numeric_price)
 

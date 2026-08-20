@@ -52,13 +52,20 @@ def build_resale_caption(
     title: str,
     price: str,
     resale_url: str,
+    seller_condition: str | None = None,
 ) -> str:
     """Build caption for Amazon Resale posts."""
+    cond_str = seller_condition.strip() if seller_condition else "Used / Amazon Resale"
+    if "مستعمل" not in cond_str and "Used" not in cond_str:
+        cond_str = f"Used / {cond_str}"
     lines = [
-        "♻️ <b>Amazon Resale</b>\n",
-        f"📦 <b>{title}</b>\n",
+        "♻️ <b>Amazon Resale</b>",
+        "",
+        f"📦 <b>{title}</b>",
+        "",
         f"💰 <b>بسعر {price}</b>",
-        "📦 <b>الحالة:</b> Used / Amazon Resale\n",
+        f"📦 <b>الحالة:</b> {cond_str}",
+        "",
         "🔗 <b>شوف العرض:</b>",
         resale_url,
     ]

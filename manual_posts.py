@@ -808,6 +808,7 @@ async def handle_publish_draft(
                         publish_result.message_id,
                         destination_id=publish_result.destination_id,
                         seller_type=draft.get("seller_type", "NEW_AMAZON"),
+                        image_path=draft.get("image_path"),
                         **price_fields,
                     )
         if not db.set_draft_status(draft_id, "published"):

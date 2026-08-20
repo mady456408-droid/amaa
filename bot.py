@@ -322,6 +322,7 @@ async def publish_validated_product(
                     publish_result.message_id,
                     destination_id=publish_result.destination_id,
                     seller_type=seller_type,
+                    image_path=product.get("screenshot"),
                     **price_fields,
                 )
 
@@ -513,6 +514,7 @@ async def process_composite_urls(
                         source_channel_id,
                         publish_result.message_id,
                         destination_id=publish_result.destination_id,
+                        image_path=entry.get("image_path"),
                         **price_fields,
                     )
 

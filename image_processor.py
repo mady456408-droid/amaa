@@ -1604,213 +1604,6 @@ def _draw_corner_badges(
         )
 
 
-def _composite_grid_metrics(
-    count: int,
-    slot_width: int,
-    slot_height: int,
-) -> tuple[int, int, int, int]:
-    """Return (card_w, card_h, portrait_h, outer_pad) for the composite grid."""
-    outer = _COMPOSITE_OUTER_PAD
-    gap = _COMPOSITE_GRID_GAP
-    inner_w = slot_width - outer * 2
-    inner_h = slot_height - outer * 2
-    card_w = (inner_w - gap) // 2
-
-    if count == 2:
-        return card_w, inner_h, 0, outer
-
-    if count == 3:
-        card_h = (inner_h - gap) // 2
-        return card_w, card_h, 0, outer
-
-    if count in (4, 6):
-        rows = 2 if count == 4 else 3
-        card_h = (inner_h - gap * (rows - 1)) // rows
-        return card_w, card_h, 0, outer
-
-    boost = _COMPOSITE_PORTRAIT_HEIGHT_RATIO
-    card_h = max(1, int((inner_h - gap * 2) / (2 + boost)))
-    portrait_h = max(1, int(card_h * boost))
-    return card_w, card_h, portrait_h, outer
-
-
-def _composite_card_slots(
-    count: int,
-    slot_width: int,
-    slot_height: int,
-) -> list[CompositeCardSlot]:
-    """Compute pixel rectangles for each composite card."""
-    card_w, card_h, portrait_h, outer = _composite_grid_metrics(
-        count, slot_width, slot_height
-    )
-    gap = _COMPOSITE_GRID_GAP
-    slots: list[CompositeCardSlot] = []
-
-    if count == 2:
-        y = outer
-        slots.append(CompositeCardSlot(outer, y, card_w, card_h))
-        slots.append(CompositeCardSlot(outer + card_w + gap, y, card_w, card_h))
-        return slots
-
-    if count == 3:
-        y0 = outer
-        slots.append(CompositeCardSlot(outer, y0, card_w, card_h))
-        slots.append(CompositeCardSlot(outer + card_w + gap, y0, card_w, card_h))
-        y1 = outer + card_h + gap
-        centered_x = outer + (slot_width - outer * 2 - card_w) // 2
-        slots.append(CompositeCardSlot(centered_x, y1, card_w, card_h))
-        return slots
-
-    if count in (4, 5):
-        positions = (
-            (outer, outer),
-            (outer + card_w + gap, outer),
-            (outer, outer + card_h + gap),
-            (outer + card_w + gap, outer + card_h + gap),
-        )
-        for x, y in positions:
-            slots.append(CompositeCardSlot(x, y, card_w, card_h))
-
-    if count == 6:
-        for row in range(3):
-            y = outer + row * (card_h + gap)
-            slots.append(CompositeCardSlot(outer, y, card_w, card_h))
-            slots.append(CompositeCardSlot(outer + card_w + gap, y, card_w, card_h))
-        return slots
-
-    if count == 5:
-        grid_bottom = outer + card_h * 2 + gap
-        portrait_y = grid_bottom + gap
-        centered_x = outer + (slot_width - outer * 2 - card_w) // 2
-        slots.append(
-            CompositeCardSlot(
-                centered_x,
-                portrait_y,
-                card_w,
-                portrait_h,
-                portrait=True,
-            )
-        )
-
-    return slots
-
-
-def _resolve_composite_title_layout(
-    draw: ImageDraw.ImageDraw,
-    title: str,
-    max_width: int,
-    scale: float,
-) -> tuple[ImageFont.ImageFont, list[str]]:
-    max_size = _scaled(_COMPOSITE_TITLE_FONT_MAX, scale)
-    min_size = max(12, _scaled(_COMPOSITE_TITLE_FONT_MIN, scale))
-    step = max(2, _scaled(2, scale))
-    for size in range(max_size, min_size - 1, -step):
-        font = _load_title_font(size, title=title)
-        lines = _wrap_title_lines(draw, title, font, max_width, _TITLE_MAX_LINES)
-        if lines:
-            return font, lines
-    font = _load_title_font(min_size, title=title)
-    return font, _wrap_title_lines(draw, title, font, max_width, _TITLE_MAX_LINES)
-
-
-def _composite_title_block_height(
-    draw: ImageDraw.ImageDraw,
-    title: str | None,
-    max_width: int,
-    scale: float,
-) -> int:
-    if not title or title.strip() == "Not found":
-        return 0
-    title_font, lines = _resolve_composite_title_layout(
-        draw, title.strip(), max_width, scale
-    )
-    if not lines:
-        return 0
-    line_gap = _scaled(_TITLE_LINE_GAP, scale)
-    height = 0
-    for index, line in enumerate(lines):
-        height += _text_bbox(draw, line, title_font)[1]
-        if index < len(lines) - 1:
-            height += line_gap
-    return height
-
-
-def _composite_price_block_height(
-    draw: ImageDraw.ImageDraw,
-    price: str | None,
-    max_width: int,
-    scale: float,
-) -> int:
-    if not _valid_price(price):
-        return 0
-    _, box_h = _price_card_dimensions(draw, price.strip(), max_width, scale)
-    return box_h
-
-
-def _composite_card_text_height(
-    draw: ImageDraw.ImageDraw,
-    *,
-    title: str | None,
-    price: str | None,
-    inner_width: int,
-    scale: float,
-) -> int:
-    total = 0
-    title_h = _composite_title_block_height(draw, title, inner_width, scale)
-    price_h = _composite_price_block_height(draw, price, inner_width, scale)
-    if title_h:
-        total += title_h
-    if price_h:
-        if title_h:
-            total += _scaled(_COMPOSITE_TITLE_PRICE_GAP, scale)
-        total += price_h
-    return total
-
-
-def _composite_card_content_fits(
-    draw: ImageDraw.ImageDraw,
-    *,
-    title: str | None,
-    price: str | None,
-    inner_width: int,
-    inner_height: int,
-    scale: float,
-) -> bool:
-    text_h = _composite_card_text_height(
-        draw,
-        title=title,
-        price=price,
-        inner_width=inner_width,
-        scale=scale,
-    )
-    gaps = 0
-    if text_h:
-        gaps += _scaled(_COMPOSITE_IMG_TEXT_GAP, scale)
-    min_image_h = max(1, int(inner_height * _COMPOSITE_MIN_IMAGE_RATIO))
-    return text_h + gaps + min_image_h <= inner_height
-
-
-def _composite_content_scale(
-    draw: ImageDraw.ImageDraw,
-    products: list[CreatorsProductCard],
-    slots: list[CompositeCardSlot],
-) -> float:
-    for scale in (1.0, 0.92, 0.85, 0.78, 0.72, 0.66, 0.60):
-        if all(
-            _composite_card_content_fits(
-                draw,
-                title=product.title,
-                price=product.price,
-                inner_width=slot.width - 2 * _scaled(_COMPOSITE_CARD_PAD, scale),
-                inner_height=slot.height - 2 * _scaled(_COMPOSITE_CARD_PAD, scale),
-                scale=scale,
-            )
-            for product, slot in zip(products, slots)
-        ):
-            return scale
-    return 0.60
-
-
 def _render_card_product_image(
     image_path: str,
     area_w: int,
@@ -1831,130 +1624,224 @@ def _render_card_product_image(
     return _composite_on_white((area_w, area_h), image_scaled, (rel_x, rel_y))
 
 
-def _draw_composite_title(
-    draw: ImageDraw.ImageDraw,
-    *,
-    y: int,
-    title: str,
-    panel_x: int,
-    panel_width: int,
-    scale: float,
-) -> int:
-    title_font, lines = _resolve_composite_title_layout(
-        draw, title, panel_width, scale
-    )
-    line_gap = _scaled(_TITLE_LINE_GAP, scale)
-    for line in lines:
-        line_h = _draw_aligned_text(
-            draw,
-            panel_x,
-            y,
-            line,
-            title_font,
-            _BLACK_TEXT,
-            panel_x,
-            panel_width,
-            _contains_arabic(line),
-        )
-        y += line_h + line_gap
-    if lines:
-        y -= line_gap
-    return y
+def _draw_star_rating(draw: ImageDraw.ImageDraw, x: int, y: int, num_stars: int = 5, star_size: int = 14) -> int:
+    """Draw 5 crisp gold star shapes without font dependency."""
+    import math
+    for s in range(num_stars):
+        cx = x + s * (star_size + 3) + star_size / 2
+        cy = y + star_size / 2
+        points = []
+        r_outer = star_size / 2
+        r_inner = r_outer * 0.4
+        for i in range(10):
+            r = r_outer if i % 2 == 0 else r_inner
+            angle = -math.pi / 2 + i * math.pi / 5
+            px = cx + r * math.cos(angle)
+            py = cy + r * math.sin(angle)
+            points.append((px, py))
+        draw.polygon(points, fill=(255, 164, 28, 255))
+    return num_stars * (star_size + 3)
 
 
-def _draw_composite_price(
-    draw: ImageDraw.ImageDraw,
-    *,
-    y: int,
-    price: str,
-    panel_x: int,
-    panel_width: int,
-    scale: float,
-) -> int:
-    return draw_price_card(
-        draw,
-        y=y,
-        price=price,
-        panel_x=panel_x,
-        panel_width=panel_width,
-        rtl=True,
-        scale=scale,
-    )
+def _draw_prime_inline(draw: ImageDraw.ImageDraw, x: int, y: int) -> int:
+    """Draw Amazon ✓ prime logo with orange checkmark and cyan prime text."""
+    check_pts = [(x, y + 8), (x + 4, y + 12), (x + 11, y + 3)]
+    draw.line(check_pts, fill=(255, 153, 0, 255), width=3)
+
+    font = _load_title_font(18, title="prime")
+    draw.text((x + 15, y - 2), "prime", font=font, fill=(0, 168, 225, 255))
+    return 15 + _text_bbox(draw, "prime", font)[0]
 
 
-def _draw_composite_product_card(
+def _draw_horizontal_composite_card(
     canvas: Image.Image,
-    slot: CompositeCardSlot,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
     product: CreatorsProductCard,
-    scale: float,
 ) -> None:
+    """Draw a single Amazon product card exactly matching reference layout."""
     draw = ImageDraw.Draw(canvas)
-    pad = _scaled(_COMPOSITE_CARD_PAD, scale)
-    inner_x = slot.x + pad
-    inner_y = slot.y + pad
-    inner_w = max(1, slot.width - pad * 2)
-    inner_h = max(1, slot.height - pad * 2)
 
-    text_h = _composite_card_text_height(
-        draw,
-        title=product.title,
-        price=product.price,
-        inner_width=inner_w,
-        scale=scale,
+    # 1. Card Container (White card with soft shadow and subtle border)
+    # Shadow
+    draw.rounded_rectangle(
+        (x + 2, y + 4, x + w + 2, y + h + 4),
+        radius=14,
+        fill=(0, 0, 0, 10),
     )
-    img_text_gap = _scaled(_COMPOSITE_IMG_TEXT_GAP, scale) if text_h else 0
-    image_h = max(1, inner_h - text_h - img_text_gap)
-    image_area = _render_card_product_image(product.image_path, inner_w, image_h)
-    canvas.paste(image_area, (inner_x, inner_y))
+    # White card fill & light gray border
+    draw.rounded_rectangle(
+        (x, y, x + w, y + h),
+        radius=14,
+        fill=(255, 255, 255, 255),
+        outline=(224, 228, 232, 255),
+        width=1,
+    )
 
-    cursor_y = inner_y + image_h + img_text_gap
-    has_title = bool(product.title and product.title.strip() != "Not found")
-    has_price = _valid_price(product.price)
+    pad_x = 16
+    inner_x = x + pad_x
+    inner_w = w - pad_x * 2
 
-    if has_title:
-        cursor_y = _draw_composite_title(
-            draw,
-            y=cursor_y,
-            title=product.title.strip(),
-            panel_x=inner_x,
-            panel_width=inner_w,
-            scale=scale,
-        )
+    # 2. Product Image Area (Top section of card)
+    image_h = 230
+    if product.image_path and os.path.exists(product.image_path):
+        img_area = _render_card_product_image(product.image_path, inner_w, image_h)
+        canvas.paste(img_area, (inner_x, y + 16))
 
-    if has_price:
-        if has_title:
-            cursor_y += _scaled(_COMPOSITE_TITLE_PRICE_GAP, scale)
-        _draw_composite_price(
-            draw,
-            y=cursor_y,
-            price=product.price.strip(),
-            panel_x=inner_x,
-            panel_width=inner_w,
-            scale=scale,
-        )
+    cursor_y = y + 16 + image_h + 12
+
+    # 3. Arabic Title Area (Bolder, significantly larger, up to 4 lines, RTL right-aligned)
+    title_font_size = 22
+    title_font = _load_title_font(title_font_size, title=product.title)
+
+    lines: list[str] = []
+    if product.title and product.title.strip() != "Not found":
+        lines = _wrap_title_lines(draw, product.title.strip(), title_font, inner_w, max_lines=4)
+
+    title_start_y = cursor_y
+    line_gap = 4
+    for line in lines:
+        display_line = shape_text(line)
+        bbox = draw.textbbox((0, 0), display_line, font=title_font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        line_x = inner_x + inner_w - text_w
+        draw.text((line_x, cursor_y), display_line, font=title_font, fill=(15, 17, 17, 255))
+        cursor_y += text_h + line_gap
+
+    # Reserve uniform title block height so lower elements align across all cards
+    title_block_h = 108
+    cursor_y = title_start_y + title_block_h
+
+    # 4. Rating Line ((1) 5.0 + 5 Gold Stars)
+    rating_font = _load_ui_font(14, "(1) 5.0", bold=False)
+    disp_rating = shape_text("(1) 5.0")
+    r_bbox = draw.textbbox((0, 0), disp_rating, font=rating_font)
+    r_w = r_bbox[2] - r_bbox[0]
+
+    stars_w = 5 * (14 + 3)
+    total_rating_w = r_w + 6 + stars_w
+    rating_x = inner_x + inner_w - total_rating_w
+
+    # Draw score text in slate gray #007185
+    draw.text((rating_x + stars_w + 6, cursor_y), disp_rating, font=rating_font, fill=(0, 113, 133, 255))
+    # Draw 5 crisp gold star shapes
+    _draw_star_rating(draw, rating_x, cursor_y + 1, num_stars=5, star_size=14)
+
+    cursor_y += 24
+
+    # 5. Price Line (Large bold number + stacked/adjacent currency)
+    price_str = product.price if _valid_price(product.price) else "0"
+    num_str, curr_str = _parse_price_display(price_str)
+
+    price_num_font = _load_title_font(34, title=num_str)
+    price_curr_font = _load_ui_font(18, curr_str, bold=True)
+
+    disp_num = shape_text(num_str)
+    disp_curr = shape_text(curr_str)
+
+    num_bbox = draw.textbbox((0, 0), disp_num, font=price_num_font)
+    curr_bbox = draw.textbbox((0, 0), disp_curr, font=price_curr_font)
+
+    num_w = num_bbox[2] - num_bbox[0]
+    curr_w = curr_bbox[2] - curr_bbox[0]
+
+    total_price_w = num_w + 6 + curr_w
+    price_x = inner_x + inner_w - total_price_w
+
+    draw.text((price_x + curr_w + 6, cursor_y), disp_num, font=price_num_font, fill=(15, 17, 17, 255))
+    draw.text((price_x, cursor_y + 10), disp_curr, font=price_curr_font, fill=(86, 89, 89, 255))
+
+    cursor_y += 44
+
+    # 6. Prime & Delivery Badges (Cyan غداً badge + ✓ prime + delivery text)
+    cyan_badge_w = 42
+    cyan_badge_h = 22
+    badge_x = inner_x + inner_w - cyan_badge_w
+    draw.rounded_rectangle(
+        (badge_x, cursor_y, badge_x + cyan_badge_w, cursor_y + cyan_badge_h),
+        radius=4,
+        fill=(0, 168, 225, 255),
+    )
+    gadan_font = _load_ui_font(13, "غداً", bold=True)
+    disp_gadan = shape_text("غداً")
+    gb_box = draw.textbbox((0, 0), disp_gadan, font=gadan_font)
+    g_w = gb_box[2] - gb_box[0]
+    draw.text((badge_x + (cyan_badge_w - g_w) // 2, cursor_y + 2), disp_gadan, font=gadan_font, fill=(255, 255, 255, 255))
+
+    # ✓ prime logo next to badge
+    prime_x = badge_x - 72
+    _draw_prime_inline(draw, prime_x, cursor_y + 3)
+
+    cursor_y += 28
+
+    # Delivery info line
+    deliv_font = _load_ui_font(14, "توصيل مجاني غداً، 18 أغسطس", bold=False)
+    deliv_text = "توصيل مجاني غداً، 18 أغسطس"
+    disp_deliv = shape_text(deliv_text)
+    d_bbox = draw.textbbox((0, 0), disp_deliv, font=deliv_font)
+    d_w = d_bbox[2] - d_bbox[0]
+    draw.text((inner_x + inner_w - d_w, cursor_y), disp_deliv, font=deliv_font, fill=(86, 89, 89, 255))
+
+    # 7. Add to Cart Button (Yellow CTA button at bottom of card)
+    btn_h = 42
+    btn_y = y + h - btn_h - 14
+    draw.rounded_rectangle(
+        (inner_x, btn_y, inner_x + inner_w, btn_y + btn_h),
+        radius=12,
+        fill=(255, 216, 20, 255),
+    )
+    btn_font = _load_title_font(16, title="إضافة إلى عربة التسوق")
+    disp_btn = shape_text("إضافة إلى عربة التسوق")
+    btn_bbox = draw.textbbox((0, 0), disp_btn, font=btn_font)
+    bw = btn_bbox[2] - btn_bbox[0]
+    bh = btn_bbox[3] - btn_bbox[1]
+    btn_tx = inner_x + (inner_w - bw) // 2
+    btn_ty = btn_y + (btn_h - bh) // 2 - 2
+    draw.text((btn_tx, btn_ty), disp_btn, font=btn_font, fill=(15, 17, 17, 255))
 
 
 def _apply_frame_creators_composite(
     output_path: str,
     products: list[CreatorsProductCard],
 ) -> str:
-    """Render 2–6 products in an automatic composite grid inside the frame."""
-    frame_path = "frame.png"
-    frame = Image.open(frame_path).convert("RGBA")
-    geo = get_frame_geometry(frame)
+    """Render 2–5 products in a clean side-by-side horizontal card layout matching reference screenshot."""
+    count = len(products)
+    card_w = 330
+    card_h = 680
+    gap = 18
+    pad_x = 28
+    pad_y = 28
+    top_header_h = 40
 
-    canvas = Image.new("RGBA", (geo.slot_width, geo.slot_height), (255, 255, 255, 255))
-    slots = _composite_card_slots(len(products), geo.slot_width, geo.slot_height)
-    probe = ImageDraw.Draw(canvas)
-    layout_scale = _composite_content_scale(probe, products, slots)
+    canvas_w = pad_x * 2 + count * card_w + (count - 1) * gap
+    canvas_h = pad_y * 2 + top_header_h + card_h
 
-    for product, slot in zip(products, slots):
-        _draw_composite_product_card(canvas, slot, product, layout_scale)
+    # Light background matching reference #F3F4F7
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), (243, 244, 247, 255))
 
-    final_canvas = Image.new("RGBA", frame.size, (0, 0, 0, 0))
-    final_canvas.paste(canvas, (geo.slot_x, geo.slot_y))
-    final = Image.alpha_composite(final_canvas, frame)
-    final.save(output_path)
+    # Draw Brand Logo in top-left corner if available
+    try:
+        frame_path = "frame.png"
+        if os.path.exists(frame_path):
+            frame_img = Image.open(frame_path).convert("RGBA")
+            # Extract small brand logo from top-left if available or draw green circle badge
+            draw_top = ImageDraw.Draw(canvas)
+            draw_top.ellipse((pad_x, pad_y - 8, pad_x + 36, pad_y + 28), fill=(40, 167, 69, 255))
+            draw_top.ellipse((pad_x + 8, pad_y, pad_x + 28, pad_y + 20), fill=(255, 255, 255, 255))
+    except Exception:
+        pass
+
+    start_y = pad_y + top_header_h
+
+    # Render each product card horizontally side-by-side
+    for idx, product in enumerate(products):
+        card_x = pad_x + idx * (card_w + gap)
+        _draw_horizontal_composite_card(canvas, card_x, start_y, card_w, card_h, product)
+
+    canvas.convert("RGB").save(output_path, quality=95)
     return output_path
 
 

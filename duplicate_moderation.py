@@ -177,6 +177,7 @@ async def publish_and_record(
                 publish_result.message_id,
                 destination_id=publish_result.destination_id,
                 seller_type=pending.get("seller_type", "NEW_AMAZON"),
+                image_path=pending.get("image_path"),
                 **price_fields,
             )
 
