@@ -241,6 +241,8 @@ def build_composite_image(entries: list[dict], output_path: str) -> None:
             image_path=entry["image_path"],
             title=entry["frame_title"],
             price=entry["price"],
+            seller_name=entry["product"].get("seller_name"),
+            seller_condition=entry["product"].get("seller_condition"),
         )
         for entry in entries
     ]

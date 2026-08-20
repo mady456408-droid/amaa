@@ -48,6 +48,7 @@ DRAFT_PROFILE: list[str] = [
     "offersV2.listings.price",
     "offersV2.listings.dealDetails",
     "offersV2.listings.merchantInfo",
+    "offersV2.listings.condition",
 ]
 
 PRICE_DROP_PROFILE: list[str] = [
@@ -524,17 +525,43 @@ def _parse_price_val(text: str | None) -> float | None:
     return parse_price_number(text)
 
 
+def _extract_offer_condition(listing: dict[str, Any]) -> str | None:
+    cond = listing.get("condition")
+    if not cond:
+        return None
+    if isinstance(cond, str):
+        return cond.strip()
+    if isinstance(cond, dict):
+        sub = cond.get("subCondition")
+        sub_val = None
+        if isinstance(sub, dict):
+            sub_val = sub.get("displayValue") or sub.get("value")
+        elif isinstance(sub, str):
+            sub_val = sub
+
+        main_val = cond.get("displayValue") or cond.get("value") or ""
+        
+        if sub_val and main_val:
+            main_norm = main_val.replace(" ", "").replace("-", "").lower()
+            sub_norm = sub_val.replace(" ", "").replace("-", "").lower()
+            if sub_norm in main_norm:
+                return main_val
+            return f"{main_val} - {sub_val}"
+        return main_val or sub_val or None
+    return None
+
+
 def extract_seller_offer(
     item: Any | None,
     seller_type: str,
-) -> tuple[str, str | None, float | None, str | None, float | None, str | None]:
+) -> tuple[str, str | None, float | None, str | None, float | None, str | None, str | None]:
     """
     Extract seller offer details for seller_type ('NEW_AMAZON' or 'AMAZON_RESALE').
-    Returns tuple: (status, price_text, price_value, list_price_text, list_price_value, seller_name)
+    Returns tuple: (status, price_text, price_value, list_price_text, list_price_value, seller_name, seller_condition)
     status: 'AVAILABLE', 'OUT_OF_STOCK', 'MISSING_MERCHANT', or 'UNKNOWN' (API failure)
     """
     if not item:
-        return ("UNKNOWN", None, None, None, None, None)
+        return ("UNKNOWN", None, None, None, None, None, None)
 
     target_merchant_id = NEW_AMAZON_SELLER_ID if seller_type == "NEW_AMAZON" else AMAZON_RESALE_SELLER_ID
 
@@ -544,12 +571,13 @@ def extract_seller_offer(
         avail = data.get("availability") or "IN_STOCK"
         if m_id == target_merchant_id:
             if avail == "OUT_OF_STOCK" or data.get("price") is None:
-                return ("OUT_OF_STOCK", None, None, None, None, None)
+                return ("OUT_OF_STOCK", None, None, None, None, None, None)
             val = float(data["price"])
             p_text = f"{val:.2f} EGP"
             s_name = data.get("merchant_name") or ("Amazon.eg" if seller_type == "NEW_AMAZON" else "Amazon Resale")
-            return ("AVAILABLE", p_text, val, None, None, s_name)
-        return ("MISSING_MERCHANT", None, None, None, None, None)
+            s_cond = data.get("condition") or data.get("seller_condition")
+            return ("AVAILABLE", p_text, val, None, None, s_name, s_cond)
+        return ("MISSING_MERCHANT", None, None, None, None, None, None)
 
     if isinstance(item, dict):
         listings = item.get("raw_listings") or []
@@ -604,17 +632,19 @@ def extract_seller_offer(
                     if seller_type == "NEW_AMAZON" and not seller_name:
                         seller_name = "Amazon.eg"
 
-                    matching_offers.append((val, price_text, list_price_text, list_val, seller_name))
+                    s_cond = _extract_offer_condition(listing)
+
+                    matching_offers.append((val, price_text, list_price_text, list_val, seller_name, s_cond))
 
     if not merchant_found:
-        return ("MISSING_MERCHANT", None, None, None, None, None)
+        return ("MISSING_MERCHANT", None, None, None, None, None, None)
 
     if not matching_offers:
-        return ("OUT_OF_STOCK", None, None, None, None, None)
+        return ("OUT_OF_STOCK", None, None, None, None, None, None)
 
     matching_offers.sort(key=lambda x: x[0])
-    lowest_offer = matching_offers[0]
-    return ("AVAILABLE", lowest_offer[1], lowest_offer[0], lowest_offer[2], lowest_offer[3], lowest_offer[4])
+    best = matching_offers[0]
+    return ("AVAILABLE", best[1], best[0], best[2], best[3], best[4], best[5])
 
 
 def _pick_buy_box_listing(listings: list[dict]) -> dict | None:

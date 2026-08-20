@@ -256,7 +256,7 @@ async def evaluate_product_price_check(
     ]
 
     for seller_type, seller_id in seller_configs:
-        status, price_text, price_val, list_text, list_val, seller_name = extract_seller_offer(
+        status, price_text, price_val, list_text, list_val, seller_name, seller_cond = extract_seller_offer(
             item, seller_type
         )
 
@@ -843,6 +843,7 @@ async def run_single_product_price_check(db: Database, input_text: str) -> dict[
         "offersV2.listings.price",
         "offersV2.listings.dealDetails",
         "offersV2.listings.merchantInfo",
+        "offersV2.listings.condition",
     ]
 
     logger.info("PRICE MONITOR → SINGLE CHECK FETCH START asin=%s", asin)
@@ -1003,6 +1004,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         "offersV2.listings.price",
         "offersV2.listings.dealDetails",
         "offersV2.listings.merchantInfo",
+        "offersV2.listings.condition",
     ]
 
     # Stage 3: Creators API batch requests with Bounded Concurrency (Semaphore(4)) & 429 Retry

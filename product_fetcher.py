@@ -80,6 +80,7 @@ def _maybe_apply_creators_frame(
     list_price: str | None = None,
     prime_exclusive: bool = False,
     seller_name: str | None = None,
+    seller_condition: str | None = None,
 ) -> str | None:
     """Apply Creators API framing (large FIT + badges) when enabled."""
     if not frame_enabled:
@@ -95,6 +96,7 @@ def _maybe_apply_creators_frame(
             list_price=list_price,
             prime_exclusive=prime_exclusive,
             seller_name=seller_name,
+            seller_condition=seller_condition,
         )
     logger.warning(
         "FRAME SKIPPED — image missing path=%s asin=%s",
@@ -220,6 +222,7 @@ async def _resolve_product_image(
     prime_exclusive: bool = False,
     title: str | None = None,
     seller_name: str | None = None,
+    seller_condition: str | None = None,
     db=None,
 ) -> str:
     """Return local image path for publish (framed or raw)."""
@@ -241,6 +244,7 @@ async def _resolve_product_image(
                     list_price=list_price,
                     prime_exclusive=prime_exclusive,
                     seller_name=seller_name,
+                    seller_condition=seller_condition,
                 )
                 return _require_screenshot(framed, asin=asin)
             return base_path
@@ -589,6 +593,16 @@ async def fetch_product(
     target_merchant_id = NEW_AMAZON_SELLER_ID if seller_type == "NEW_AMAZON" else AMAZON_RESALE_SELLER_ID
 
     if client and creators_api_configured():
+        if seller_type == "AMAZON_RESALE":
+            logger.info(
+                "RESALE FETCH START\n"
+                "  asin=%s\n"
+                "  seller_type=AMAZON_RESALE\n"
+                "  merchant_id=%s\n"
+                "  source=CREATORS_API",
+                asin.upper(),
+                AMAZON_RESALE_SELLER_ID,
+            )
         try:
             items = await client.get_items(
                 [asin],
@@ -613,7 +627,7 @@ async def fetch_product(
                     "screenshot": None,
                 }
 
-            status, p_text, p_val, l_text, l_val, s_name = extract_seller_offer(item, seller_type)
+            status, p_text, p_val, l_text, l_val, s_name, s_cond = extract_seller_offer(item, seller_type)
 
             if status != "AVAILABLE" or not p_text or p_text == "Not found":
                 if seller_type == "AMAZON_RESALE":
@@ -632,7 +646,17 @@ async def fetch_product(
                 }
 
             if seller_type == "AMAZON_RESALE":
-                logger.info("RESALE OFFER FOUND merchant_id=%s price=%s availability=AVAILABLE", target_merchant_id, p_text)
+                logger.info(
+                    "RESALE OFFER FOUND\n"
+                    "  merchant_id=%s\n"
+                    "  price=%s\n"
+                    "  condition=%s\n"
+                    "  availability=AVAILABLE",
+                    target_merchant_id,
+                    p_text,
+                    s_cond or "Used",
+                )
+                logger.info("RESALE FETCH SUCCESS\n  source=CREATORS_API")
             else:
                 logger.info("NEW OFFER FOUND merchant_id=%s price=%s availability=AVAILABLE", target_merchant_id, p_text)
 
@@ -645,6 +669,7 @@ async def fetch_product(
                 "detail_page_url": item.detail_page_url,
                 "features": item.features,
                 "seller_name": s_name or item.seller_name,
+                "seller_condition": s_cond,
                 "seller_type": seller_type,
                 "merchant_id": target_merchant_id,
                 "seller_offer_available": True,
@@ -681,6 +706,7 @@ async def fetch_product(
                 list_price=product["list_price"],
                 prime_exclusive=item.prime_exclusive,
                 seller_name=product["seller_name"],
+                seller_condition=product["seller_condition"],
                 db=db,
             )
 
@@ -699,8 +725,12 @@ async def fetch_product(
         except RuntimeError:
             raise
         except CreatorsAPIError as exc:
+            if seller_type == "AMAZON_RESALE":
+                logger.warning("RESALE CREATORS API FAILED\n  error=%s", exc)
             _log_creators_fallback(asin, exc)
-        except Exception:
+        except Exception as exc:
+            if seller_type == "AMAZON_RESALE":
+                logger.warning("RESALE CREATORS API FAILED\n  error=%s", exc)
             logger.exception("CREATORS API FALLBACK — unexpected error")
 
     # Full Playwright fallback (transparent to user).

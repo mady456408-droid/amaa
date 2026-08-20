@@ -16,44 +16,44 @@ _HAS_RAQM = features.check("raqm")
 _FONT_SCALE = 1.15
 
 _FRAME_PADDING = 40
-_LEFT_PANEL_RATIO_MIN = 0.30
-_LEFT_PANEL_RATIO_MAX = 0.32
+_LEFT_PANEL_RATIO_MIN = 0.36
+_LEFT_PANEL_RATIO_MAX = 0.40
 _OLD_PRICE_CARD_GAP = 24
-_TITLE_OLD_PRICE_GAP = 32
+_TITLE_OLD_PRICE_GAP = 28
 _PRICE_SELLER_GAP = 14
-_SELLER_LINE_GAP = 5
+_SELLER_LINE_GAP = 6
 _IMG_PANEL_PAD = 16
 _IMG_FILL_RATIO = 0.966
 _TALL_ASPECT_THRESHOLD = 0.88
 _INFO_PAD = 28
 _INFO_TOP_OFFSET = 6
-_TITLE_MAX_LINES = 2
+_TITLE_MAX_LINES = 3
 _TITLE_AFTER_GAP = 20
 _TITLE_FONT_MAX = int(72 * _FONT_SCALE)
-_TITLE_FONT_MIN = int(44 * _FONT_SCALE)
-_TITLE_LINE_GAP = int(16 * _FONT_SCALE)
-_OLD_PRICE_FONT = int(70 * _FONT_SCALE)
+_TITLE_FONT_MIN = int(40 * _FONT_SCALE)
+_TITLE_LINE_GAP = int(14 * _FONT_SCALE)
+_OLD_PRICE_FONT = int(68 * _FONT_SCALE)
 _OLD_PRICE_STRIKE_WIDTH = int(6 * _FONT_SCALE)
 _PRICE_LABEL_FONT = int(32 * _FONT_SCALE)
 _PRICE_CURRENCY_FONT = int(42 * _FONT_SCALE)
 _PRICE_NUM_MAX = int(110 * _FONT_SCALE)
-_PRICE_NUM_MIN = int(72 * _FONT_SCALE)
-_PRICE_CARD_PAD_X = 50
-_PRICE_CARD_PAD_Y = 35
+_PRICE_NUM_MIN = int(68 * _FONT_SCALE)
+_PRICE_CARD_PAD_X = 48
+_PRICE_CARD_PAD_Y = 32
 _PRICE_CARD_RADIUS = 26
-_PRICE_CARD_INNER_RESERVE = 100
+_PRICE_CARD_INNER_RESERVE = 90
 _PRICE_CARD_WIDTH_BOOST = 1.12
 _PRICE_NUM_CURRENCY_GAP = 11
-_DISCOUNT_BADGE_FONT = int(46 * _FONT_SCALE)
-_DISCOUNT_BADGE_PAD_X = 28
+_DISCOUNT_BADGE_FONT = int(48 * _FONT_SCALE)
+_DISCOUNT_BADGE_PAD_X = 30
 _DISCOUNT_BADGE_PAD_Y = 16
-_DISCOUNT_BADGE_RADIUS = 19
+_DISCOUNT_BADGE_RADIUS = 20
 _AMAZON_YELLOW = (255, 216, 20, 255)
 _GRAY_TEXT = (70, 70, 70, 255)
 _LABEL_GRAY = (85, 85, 85, 255)
 _BLACK_TEXT = (10, 10, 10, 255)
-_DISCOUNT_RED = (190, 35, 35, 255)
-_PRIME_BLUE_LIGHT = (0, 168, 225, 105)
+_DISCOUNT_RED = (220, 20, 45, 255)
+_PRIME_BLUE_LIGHT = (0, 168, 225, 120)
 _PRIME_BADGE_FONT = int(26 * _FONT_SCALE)
 _PRIME_BADGE_PAD_X = 17
 _PRIME_BADGE_PAD_Y = 7
@@ -84,6 +84,7 @@ class CreatorsProductCard(NamedTuple):
     list_price: str | None = None
     prime_exclusive: bool = False
     seller_name: str | None = None
+    seller_condition: str | None = None
 
 
 class CompositeCardSlot(NamedTuple):
@@ -312,6 +313,7 @@ def apply_frame_creators_product(
     list_price: str | None = None,
     prime_exclusive: bool = False,
     seller_name: str | None = None,
+    seller_condition: str | None = None,
 ) -> str:
     """
     Premium Creators API product card: info panel left, product image right.
@@ -365,6 +367,7 @@ def apply_frame_creators_product(
         price=price,
         list_price=list_price,
         seller_name=seller_name,
+        seller_condition=seller_condition,
         layout_scale=layout_scale,
     )
     _draw_corner_badges(
@@ -913,77 +916,112 @@ def _info_content_group_height(
     return total
 
 
+def _format_resale_condition_display(seller_condition: str | None) -> str:
+    """Format condition for display on Resale deal image card."""
+    if not seller_condition:
+        return "📦 مستعمل"
+    cond_upper = seller_condition.strip().upper()
+    if cond_upper in ("USED", "USED - GENERIC", "مستعمل"):
+        return "📦 مستعمل"
+    if "LIKE NEW" in cond_upper or "LIKENEW" in cond_upper or "شبه جديد" in seller_condition:
+        return "✨ مستعمل - شبه جديد"
+    if "VERY GOOD" in cond_upper or "جيد جداً" in seller_condition or "جيد جدا" in seller_condition:
+        return "✨ مستعمل - بحالة جيدة جداً"
+    if "GOOD" in cond_upper or "جيد" in seller_condition:
+        return "📦 مستعمل - بحالة جيدة"
+    if "ACCEPTABLE" in cond_upper or "مقبول" in seller_condition:
+        return "📦 مستعمل - بحالة مقبولة"
+    clean_cond = seller_condition.strip()
+    if "مستعمل" not in clean_cond:
+        return f"📦 مستعمل - {clean_cond}"
+    return f"📦 {clean_cond}"
+
+
 def _seller_line_height(
     draw: ImageDraw.ImageDraw,
     seller_name: str,
     panel_width: int,
     scale: float,
+    seller_condition: str | None = None,
 ) -> int:
-    """Calculate height of seller lines (two lines: label + name)."""
-    label_font_size = _scaled(int(_TITLE_FONT_MAX * 0.5), scale)
-    name_font_size = _scaled(int(_TITLE_FONT_MAX * 0.6), scale)
-    label_font = _load_title_font(label_font_size, title="Sold by")
-    name_font = _load_title_font(name_font_size, title=seller_name)
-    if label_font is None or name_font is None:
+    """Calculate height of seller badge with condition lines."""
+    is_resale = "RESALE" in seller_name.upper() or "مستعمل" in seller_name
+    font_size = _scaled(int(_TITLE_FONT_MAX * 0.44), scale)
+    font_header = _load_title_font(font_size, title="Amazon Resale" if is_resale else "Amazon.eg")
+    if font_header is None:
         return 0
-    gap = _scaled(_SELLER_LINE_GAP, scale)
-    return label_font.size + gap + name_font.size
+    pad_y = _scaled(10, scale)
+    if is_resale:
+        cond_text = _format_resale_condition_display(seller_condition)
+        font_cond = _load_title_font(int(font_size * 0.9), title=cond_text)
+        tb_h1 = _text_bbox(draw, "Amazon Resale", font_header)[1]
+        tb_h2 = _text_bbox(draw, cond_text, font_cond)[1] if font_cond else 0
+        gap_y = _scaled(4, scale)
+        return tb_h1 + tb_h2 + gap_y + pad_y * 2
+    return font_header.size + pad_y * 2
 
 
-def _draw_seller_line(
+def draw_seller_badge(
     draw: ImageDraw.ImageDraw,
     *,
     y: int,
     seller_name: str,
     price_card_rect: tuple[int, int, int, int],
     scale: float,
-) -> None:
-    """Draw seller lines below price card with two-line layout."""
-    label_font_size = _scaled(int(_TITLE_FONT_MAX * 0.5), scale)
-    name_font_size = _scaled(int(_TITLE_FONT_MAX * 0.6), scale)
-    label_font = _load_ui_font(label_font_size, "Sold by", bold=False)
-    name_font = _load_title_font(name_font_size, title=seller_name)
-    if label_font is None or name_font is None:
-        return
-
-    # Extract price card rectangle
+    seller_condition: str | None = None,
+) -> int:
+    """Draw a visually distinct seller badge below price card with condition support."""
     card_x, card_y, card_w, card_h = price_card_rect
     card_center_x = card_x + card_w // 2
 
-    # First line: "Sold by" - medium gray, regular weight
-    label_text = "Sold by"
-    label_color = (119, 119, 119)  # #777777
-    label_bbox = draw.textbbox((0, 0), label_text, font=label_font)
-    label_width = label_bbox[2] - label_bbox[0]
-    label_x = card_center_x - label_width // 2
-    draw.text((label_x, y), label_text, font=label_font, fill=label_color)
+    is_resale = "RESALE" in seller_name.upper() or "مستعمل" in seller_name
 
-    # Gap between lines
-    gap = _scaled(_SELLER_LINE_GAP, scale)
+    if is_resale:
+        header_text = "♻️ Amazon Resale"
+        cond_text = _format_resale_condition_display(seller_condition)
+        badge_fill = (235, 248, 240, 255)
+        text_color = (15, 110, 60, 255)
+        cond_color = (25, 130, 70, 255)
+        border_color = (35, 155, 85, 255)
+    else:
+        header_text = "📦 البائع: Amazon.eg"
+        cond_text = None
+        badge_fill = (240, 244, 252, 255)
+        text_color = (20, 55, 100, 255)
+        cond_color = None
+        border_color = (175, 195, 225, 255)
 
-    # Second line: seller name - dark gray, semi-bold
-    name_color = (68, 68, 68)  # #444444
-    name_bbox = draw.textbbox((0, 0), seller_name, font=name_font)
-    name_width = name_bbox[2] - name_bbox[0]
+    font_size = _scaled(int(_TITLE_FONT_MAX * 0.44), scale)
+    font_header = _load_title_font(font_size, title=header_text)
+    font_cond = _load_title_font(int(font_size * 0.9), title=cond_text or "") if cond_text else None
 
-    # Truncate seller name if too long
-    max_text_width = card_w
-    if name_width > max_text_width:
-        low, high = 0, len(seller_name)
-        while low < high:
-            mid = (low + high) // 2
-            truncated = f"{seller_name[:mid]}..."
-            bbox = draw.textbbox((0, 0), truncated, font=name_font)
-            if bbox[2] - bbox[0] <= max_text_width:
-                low = mid + 1
-            else:
-                high = mid
-        seller_name = seller_name[:max(0, low - 1)]
-        name_bbox = draw.textbbox((0, 0), seller_name, font=name_font)
-        name_width = name_bbox[2] - name_bbox[0]
+    pad_x = _scaled(20, scale)
+    pad_y = _scaled(10, scale)
+    gap_y = _scaled(4, scale)
+    radius = _scaled(14, scale)
 
-    name_x = card_center_x - name_width // 2
-    draw.text((name_x, y + label_font.size + gap), seller_name, font=name_font, fill=name_color)
+    tb_w1, tb_h1 = _text_bbox(draw, header_text, font_header)
+    tb_w2, tb_h2 = _text_bbox(draw, cond_text, font_cond) if (cond_text and font_cond) else (0, 0)
+
+    box_w = max(tb_w1, tb_w2) + pad_x * 2
+    box_h = tb_h1 + (tb_h2 + gap_y if cond_text else 0) + pad_y * 2
+
+    x1 = card_center_x - box_w // 2
+    x2 = x1 + box_w
+    y1 = y
+    y2 = y1 + box_h
+
+    # Draw rounded rectangle badge with subtle border
+    draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=badge_fill, outline=border_color, width=max(1, _scaled(2, scale)))
+    
+    header_x = x1 + (box_w - tb_w1) // 2
+    _draw_text(draw, (header_x, y1 + pad_y), header_text, font_header, text_color)
+
+    if cond_text and font_cond:
+        cond_x = x1 + (box_w - tb_w2) // 2
+        _draw_text(draw, (cond_x, y1 + pad_y + tb_h1 + gap_y), cond_text, font_cond, cond_color)
+
+    return y2
 
 
 def _resolve_title_layout(
@@ -1415,6 +1453,7 @@ def _draw_info_panel(
     price: str | None,
     list_price: str | None,
     seller_name: str | None = None,
+    seller_condition: str | None = None,
     layout_scale: float,
 ) -> None:
     draw = ImageDraw.Draw(canvas)
@@ -1484,12 +1523,13 @@ def _draw_info_panel(
     # Draw seller name below price card (outside the price card)
     if has_seller and has_current:
         cursor_y += _scaled(_PRICE_SELLER_GAP, layout_scale)
-        _draw_seller_line(
+        cursor_y = draw_seller_badge(
             draw,
             y=cursor_y,
             seller_name=seller_name.strip(),
             price_card_rect=price_card_rect,
             scale=layout_scale,
+            seller_condition=seller_condition,
         )
 
 
