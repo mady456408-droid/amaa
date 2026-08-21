@@ -9,11 +9,11 @@ from telebot.apihelper import ApiTelegramException
 
 from chatgpt_client import ChatGPT as ChatGPTClient
 
-BOT_TOKEN = "8343066641:AAHIeGxDPGghrqTQL8m7oMVfFFoVooVXJuc"
-ADMIN_IDS = [941439783]
+BOT_TOKEN = "Juc"
+ADMIN_IDS = [1245687]
 CONFIG_FILE = "config.json"
 COOKIES_FILE = "cookies.json"
-CHANNEL_USERNAME = "@LOQTABGD"
+CHANNEL_USERNAME = "@LO5545GD"
 
 PAYLOAD_LABELS = {
     "model": "النموذج",
