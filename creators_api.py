@@ -95,10 +95,12 @@ class CreatorsAPIError(Exception):
         *,
         status_code: int | None = None,
         response_body: str | None = None,
+        retry_after: float | None = None,
     ):
         super().__init__(message)
         self.status_code = status_code
         self.response_body = response_body
+        self.retry_after = retry_after
 
 
 def _mask_partner_tag(tag: str) -> str:
@@ -419,7 +421,7 @@ class TokenManager:
 
 
 class CreatorsRateLimiter:
-    """Asyncio-safe limiter: TPS + daily quota."""
+    """Asyncio-safe limiter: TPS + daily quota + global cooldown."""
 
     def __init__(
         self,
@@ -437,6 +439,8 @@ class CreatorsRateLimiter:
         self._day_count = 0
         self._queue_depth = 0
         self._active_requests = 0
+        self._cooldown_until = 0.0
+        self._consecutive_429 = 0
 
     async def acquire(self, source: str = "REALTIME") -> None:
         wait = 0.0
@@ -457,8 +461,9 @@ class CreatorsRateLimiter:
                 )
 
             now = time.monotonic()
-            if self._last_request <= now:
-                target_time = now
+            base_time = max(now, self._cooldown_until)
+            if self._last_request < base_time:
+                target_time = base_time
             else:
                 target_time = self._last_request + self._min_interval
 
@@ -467,13 +472,15 @@ class CreatorsRateLimiter:
             self._day_count += 1
             self._active_requests += 1
 
+            cooldown_rem = max(0.0, self._cooldown_until - now)
             logger.info(
-                "CREATORS RATE LIMIT: name=%s source=%s wait_ms=%.1f active_requests=%s queue_depth=%s",
+                "CREATORS RATE LIMIT: name=%s source=%s wait_ms=%.1f active_requests=%s queue_depth=%s cooldown_remaining_ms=%.1f",
                 self.name,
                 source,
                 wait * 1000.0,
                 self._active_requests,
                 curr_queue,
+                cooldown_rem * 1000.0,
             )
 
         # Sleep OUTSIDE the lock to prevent blocking callers
@@ -486,6 +493,29 @@ class CreatorsRateLimiter:
     async def release_request(self) -> None:
         async with self._lock:
             self._active_requests = max(0, self._active_requests - 1)
+
+    async def record_cooldown(self, duration: float) -> None:
+        """Set or extend global cooldown for this limiter."""
+        async with self._lock:
+            now = time.monotonic()
+            target = now + max(0.0, duration)
+            if target > self._cooldown_until:
+                self._cooldown_until = target
+                logger.info(
+                    "CREATORS RATE LIMIT COOLDOWN: name=%s duration=%.2fs cooldown_until=%.2f",
+                    self.name,
+                    duration,
+                    self._cooldown_until,
+                )
+
+    async def record_success(self) -> None:
+        """Reset consecutive 429 counter on success."""
+        async with self._lock:
+            self._consecutive_429 = 0
+
+    def get_cooldown_remaining(self) -> float:
+        now = time.monotonic()
+        return max(0.0, self._cooldown_until - now)
 
 
 def _format_egp_price(money: dict[str, Any] | None) -> str:
@@ -801,6 +831,15 @@ class CreatorsClient:
             await self._http.aclose()
             self._http = None
 
+    async def record_monitoring_cooldown(self, duration: float) -> None:
+        await self._monitoring_limiter.record_cooldown(duration)
+
+    async def record_monitoring_success(self) -> None:
+        await self._monitoring_limiter.record_success()
+
+    def get_monitoring_cooldown_remaining(self) -> float:
+        return self._monitoring_limiter.get_cooldown_remaining()
+
     def _client(self) -> httpx.AsyncClient:
         if self._http is None:
             self._http = httpx.AsyncClient(timeout=60.0)
@@ -913,10 +952,18 @@ class CreatorsClient:
             parsed = _log_creators_response(resp)
 
             if resp.status_code == 429:
+                retry_after_hdr = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
+                retry_after_val: float | None = None
+                if retry_after_hdr:
+                    try:
+                        retry_after_val = float(retry_after_hdr)
+                    except ValueError:
+                        pass
                 raise CreatorsAPIError(
                     "Rate limited",
                     status_code=429,
                     response_body=response_text[:_RESPONSE_BODY_LOG_LIMIT],
+                    retry_after=retry_after_val,
                 )
             if resp.status_code >= 500:
                 raise CreatorsAPIError(

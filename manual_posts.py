@@ -28,6 +28,7 @@ from link_resolver import (
     is_http_url,
     is_manual_post_input,
     is_standalone_asin,
+    resolve_product_input,
     resolve_redirect,
 )
 from ai_caption import build_product_caption
@@ -276,18 +277,26 @@ async def prepare_draft_from_input(
     held_image: str | None = None
 
     try:
-        resolved = await resolve_asin_from_input(item)
+        resolved = await resolve_product_input(item, AMAZON_DOMAIN)
         if not resolved:
             return None
 
-        asin, clean_url = resolved
-        seller_type = (
-            "AMAZON_RESALE"
-            if ("A2N2MP47XAP1MK" in item or "m=A2N2MP47XAP1MK" in item or "A2N2MP47XAP1MK" in clean_url or "m=A2N2MP47XAP1MK" in clean_url)
-            else "NEW_AMAZON"
+        asin = resolved.asin
+        clean_url = resolved.clean_url
+        seller_type = resolved.seller_type
+        merchant_id = resolved.merchant_id or (AMAZON_RESALE_SELLER_ID if seller_type == "AMAZON_RESALE" else NEW_AMAZON_SELLER_ID)
+
+        logger.info(
+            "MANUAL DRAFT RESOLUTION:\n"
+            "  asin=%s\n"
+            "  seller_type=%s\n"
+            "  merchant_id=%s\n"
+            "  clean_url=%s",
+            asin,
+            seller_type,
+            merchant_id,
+            clean_url,
         )
-        merchant_id = AMAZON_RESALE_SELLER_ID if seller_type == "AMAZON_RESALE" else NEW_AMAZON_SELLER_ID
-        clean_url = build_clean_url(asin, AMAZON_DOMAIN, merchant_id=merchant_id if seller_type == "AMAZON_RESALE" else None)
 
         coupon_enabled = db.get_coupon_detection_enabled()
         product = await fetch_product(

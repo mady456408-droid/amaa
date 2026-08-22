@@ -81,6 +81,8 @@ def _maybe_apply_creators_frame(
     prime_exclusive: bool = False,
     seller_name: str | None = None,
     seller_condition: str | None = None,
+    seller_type: str = "NEW_AMAZON",
+    merchant_id: str | None = None,
 ) -> str | None:
     """Apply Creators API framing (large FIT + badges) when enabled."""
     if not frame_enabled:
@@ -91,12 +93,15 @@ def _maybe_apply_creators_frame(
         return apply_frame_creators_product(
             image_path,
             output_path,
+            asin=asin,
             title=title,
             price=price,
             list_price=list_price,
             prime_exclusive=prime_exclusive,
             seller_name=seller_name,
             seller_condition=seller_condition,
+            seller_type=seller_type,
+            merchant_id=merchant_id,
         )
     logger.warning(
         "FRAME SKIPPED — image missing path=%s asin=%s",
@@ -223,6 +228,8 @@ async def _resolve_product_image(
     title: str | None = None,
     seller_name: str | None = None,
     seller_condition: str | None = None,
+    seller_type: str = "NEW_AMAZON",
+    merchant_id: str | None = None,
     db=None,
 ) -> str:
     """Return local image path for publish (framed or raw)."""
@@ -245,6 +252,8 @@ async def _resolve_product_image(
                     prime_exclusive=prime_exclusive,
                     seller_name=seller_name,
                     seller_condition=seller_condition,
+                    seller_type=seller_type,
+                    merchant_id=merchant_id,
                 )
                 return _require_screenshot(framed, asin=asin)
             return base_path
@@ -707,6 +716,8 @@ async def fetch_product(
                 prime_exclusive=item.prime_exclusive,
                 seller_name=product["seller_name"],
                 seller_condition=product["seller_condition"],
+                seller_type=seller_type,
+                merchant_id=target_merchant_id,
                 db=db,
             )
 

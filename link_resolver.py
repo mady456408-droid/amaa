@@ -209,6 +209,70 @@ def extract_manual_inputs(text: str) -> list[str]:
     return inputs
 
 
+from dataclasses import dataclass
+from urllib.parse import parse_qs, urlparse
+
+NEW_AMAZON_SELLER_ID = "A1ZVRGNO5AYLOV"
+AMAZON_RESALE_SELLER_ID = "A2N2MP47XAP1MK"
+
+
+@dataclass
+class ResolvedProductInput:
+    asin: str
+    merchant_id: str | None
+    seller_type: str  # 'AMAZON_RESALE' or 'NEW_AMAZON'
+    clean_url: str
+    final_url: str | None = None
+
+
+def extract_merchant_id(url: str) -> str | None:
+    """Extract merchant/seller ID from query parameters or raw URL string."""
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        for key in ("m", "merchant", "seller", "sellerId"):
+            if key in params and params[key]:
+                val = params[key][0].strip().upper()
+                if val:
+                    return val
+    except Exception:
+        pass
+
+    # Regex fallback for embedded query parameters or raw text tokens
+    match = re.search(r"[?&](?:m|merchant|seller|sellerId)=([A-Z0-9]+)", url, re.I)
+    if match:
+        return match.group(1).upper()
+
+    return None
+
+
+def classify_seller_from_merchant_id(merchant_id: str | None) -> tuple[str, str | None]:
+    """
+    Classify seller_type and normalize merchant_id based on explicit rules:
+    - A2N2MP47XAP1MK -> ("AMAZON_RESALE", "A2N2MP47XAP1MK")
+    - A1ZVRGNO5AYLOV -> ("NEW_AMAZON", "A1ZVRGNO5AYLOV")
+    - None / Absent  -> ("NEW_AMAZON", None) [no explicit merchant parameter]
+    - Unknown 3rd party -> ("NEW_AMAZON", merchant_id) [logged as unsupported 3rd party]
+    """
+    if not merchant_id:
+        logger.info("SELLER CLASSIFICATION: no explicit merchant_id -> default NEW_AMAZON")
+        return ("NEW_AMAZON", None)
+
+    norm_m_id = merchant_id.strip().upper()
+    if norm_m_id == AMAZON_RESALE_SELLER_ID:
+        logger.info("SELLER CLASSIFICATION: merchant_id=%s -> AMAZON_RESALE", norm_m_id)
+        return ("AMAZON_RESALE", AMAZON_RESALE_SELLER_ID)
+
+    if norm_m_id == NEW_AMAZON_SELLER_ID:
+        logger.info("SELLER CLASSIFICATION: merchant_id=%s -> NEW_AMAZON", norm_m_id)
+        return ("NEW_AMAZON", NEW_AMAZON_SELLER_ID)
+
+    logger.warning("SELLER CLASSIFICATION: unknown/unsupported merchant_id=%s -> default NEW_AMAZON", norm_m_id)
+    return ("NEW_AMAZON", norm_m_id)
+
+
 def build_clean_url(asin: str, domain: str, merchant_id: str | None = None) -> str:
     domain = domain.replace("https://", "").replace("http://", "").strip("/")
     url = f"https://{domain}/dp/{asin}"
@@ -249,10 +313,10 @@ async def resolve_redirect(url: str) -> str:
     return final
 
 
-async def resolve_asin_from_input(user_input: str) -> str | None:
+async def resolve_product_input(user_input: str, domain: str = "www.amazon.eg") -> ResolvedProductInput | None:
     """
-    Extract and normalize canonical 10-char ASIN from plain ASIN or Amazon URL (including redirects).
-    Returns capitalized 10-char ASIN or None if invalid.
+    Single source of truth for resolving ASIN, merchant_id, seller_type, and clean_url.
+    Preserves merchant parameters across HTTP redirects (e.g. short links amzn.to / a.co).
     """
     if not user_input:
         return None
@@ -260,30 +324,84 @@ async def resolve_asin_from_input(user_input: str) -> str | None:
     if not text:
         return None
 
+    logger.info("PRODUCT RESOLVER INPUT: %s", text)
+
     # 1. Direct 10-char ASIN check
     if len(text) == 10 and re.match(r"^[A-Z0-9]{10}$", text, re.I):
-        return text.upper()
+        asin = text.upper()
+        seller_type, merchant_id = classify_seller_from_merchant_id(None)
+        clean_url = build_clean_url(asin, domain, merchant_id=merchant_id)
+        logger.info(
+            "RESOLVER RESULT (bare ASIN):\n"
+            "  asin=%s\n"
+            "  seller_type=%s\n"
+            "  merchant_id=%s\n"
+            "  clean_url=%s",
+            asin,
+            seller_type,
+            merchant_id,
+            clean_url,
+        )
+        return ResolvedProductInput(
+            asin=asin,
+            merchant_id=merchant_id,
+            seller_type=seller_type,
+            clean_url=clean_url,
+            final_url=None,
+        )
 
-    # 2. Extract ASIN from direct URL
-    asin = extract_asin(text)
-    if asin and len(asin) == 10:
-        return asin.upper()
-
-    # 3. Resolve redirect if http(s) URL (short links, affiliate links)
+    # 2. Direct Amazon URL or HTTP short link redirect
+    final_url: str | None = None
     if is_http_url(text):
         try:
             final_url = await resolve_redirect(text)
-            asin = extract_asin(final_url)
-            if asin and len(asin) == 10:
-                return asin.upper()
         except Exception as exc:
             logger.warning("RESOLVER REDIRECT FAILED input=%s exc=%s", text, exc)
 
-    # 4. Fallback search for any 10-char ASIN token
-    match = re.search(r"\b([A-Z0-9]{10})\b", text, re.I)
-    if match:
-        token = match.group(1).upper()
-        if len(token) == 10:
-            return token
+    target_url = final_url or text
+    asin = extract_asin(target_url) or extract_asin(text)
 
-    return None
+    if not asin:
+        match = re.search(r"\b([A-Z0-9]{10})\b", text, re.I)
+        if match:
+            token = match.group(1).upper()
+            if len(token) == 10:
+                asin = token
+
+    if not asin:
+        logger.warning("RESOLVER FAILED: no valid ASIN found in input=%r", text)
+        return None
+
+    asin = asin.upper()
+    merchant_id = extract_merchant_id(target_url) or extract_merchant_id(text)
+    seller_type, resolved_merchant_id = classify_seller_from_merchant_id(merchant_id)
+    clean_url = build_clean_url(asin, domain, merchant_id=resolved_merchant_id)
+
+    logger.info(
+        "RESOLVER RESULT:\n"
+        "  asin=%s\n"
+        "  seller_type=%s\n"
+        "  merchant_id=%s\n"
+        "  clean_url=%s\n"
+        "  final_url=%s",
+        asin,
+        seller_type,
+        resolved_merchant_id,
+        clean_url,
+        final_url,
+    )
+
+    return ResolvedProductInput(
+        asin=asin,
+        merchant_id=resolved_merchant_id,
+        seller_type=seller_type,
+        clean_url=clean_url,
+        final_url=final_url,
+    )
+
+
+async def resolve_asin_from_input(user_input: str) -> str | None:
+    """Legacy helper: Returns capitalized 10-char ASIN string or None."""
+    res = await resolve_product_input(user_input)
+    return res.asin if res else None
+

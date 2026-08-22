@@ -49,15 +49,16 @@ _DISCOUNT_BADGE_PAD_X = 30
 _DISCOUNT_BADGE_PAD_Y = 16
 _DISCOUNT_BADGE_RADIUS = 20
 _AMAZON_YELLOW = (255, 216, 20, 255)
-_GRAY_TEXT = (70, 70, 70, 255)
-_LABEL_GRAY = (85, 85, 85, 255)
-_BLACK_TEXT = (10, 10, 10, 255)
-_DISCOUNT_RED = (220, 20, 45, 255)
-_PRIME_BLUE_LIGHT = (0, 168, 225, 120)
-_PRIME_BADGE_FONT = int(26 * _FONT_SCALE)
-_PRIME_BADGE_PAD_X = 17
-_PRIME_BADGE_PAD_Y = 7
-_PRIME_BADGE_RADIUS = 13
+_AMAZON_YELLOW_BORDER = (235, 195, 10, 255)
+_GRAY_TEXT = (86, 89, 89, 255)
+_LABEL_GRAY = (86, 89, 89, 255)
+_BLACK_TEXT = (15, 17, 17, 255)
+_DISCOUNT_RED = (204, 12, 57, 255)
+_PRIME_BLUE_LIGHT = (0, 168, 225, 255)
+_PRIME_BADGE_FONT = int(32 * _FONT_SCALE)
+_PRIME_BADGE_PAD_X = 22
+_PRIME_BADGE_PAD_Y = 10
+_PRIME_BADGE_RADIUS = 16
 _WHITE_THRESHOLD = 248
 _TRANSPARENT_ALPHA = 12
 _CORNER_BADGE_MARGIN = 32
@@ -919,22 +920,22 @@ def _info_content_group_height(
 def _format_resale_condition_display(seller_condition: str | None) -> str:
     """Format condition for display on Resale deal image card."""
     if not seller_condition:
-        return "📦 مستعمل"
+        return "مستعمل"
     cond_upper = seller_condition.strip().upper()
     if cond_upper in ("USED", "USED - GENERIC", "مستعمل"):
-        return "📦 مستعمل"
+        return "مستعمل"
     if "LIKE NEW" in cond_upper or "LIKENEW" in cond_upper or "شبه جديد" in seller_condition:
-        return "✨ مستعمل - شبه جديد"
+        return "مستعمل - شبه جديد"
     if "VERY GOOD" in cond_upper or "جيد جداً" in seller_condition or "جيد جدا" in seller_condition:
-        return "✨ مستعمل - بحالة جيدة جداً"
+        return "مستعمل - بحالة جيدة جداً"
     if "GOOD" in cond_upper or "جيد" in seller_condition:
-        return "📦 مستعمل - بحالة جيدة"
+        return "مستعمل - بحالة جيدة"
     if "ACCEPTABLE" in cond_upper or "مقبول" in seller_condition:
-        return "📦 مستعمل - بحالة مقبولة"
+        return "مستعمل - بحالة مقبولة"
     clean_cond = seller_condition.strip()
     if "مستعمل" not in clean_cond:
-        return f"📦 مستعمل - {clean_cond}"
-    return f"📦 {clean_cond}"
+        return f"مستعمل - {clean_cond}"
+    return clean_cond
 
 
 def _seller_line_height(
@@ -947,7 +948,7 @@ def _seller_line_height(
     """Calculate height of seller badge with condition lines."""
     is_resale = "RESALE" in seller_name.upper() or "مستعمل" in seller_name
     font_size = _scaled(int(_TITLE_FONT_MAX * 0.44), scale)
-    font_header = _load_title_font(font_size, title="Amazon Resale" if is_resale else "Amazon.eg")
+    font_header = _load_title_font(font_size, title="Amazon Resale" if is_resale else "البائع: Amazon.eg")
     if font_header is None:
         return 0
     pad_y = _scaled(10, scale)
@@ -977,25 +978,25 @@ def draw_seller_badge(
     is_resale = "RESALE" in seller_name.upper() or "مستعمل" in seller_name
 
     if is_resale:
-        header_text = "♻️ Amazon Resale"
+        header_text = "Amazon Resale"
         cond_text = _format_resale_condition_display(seller_condition)
-        badge_fill = (235, 248, 240, 255)
-        text_color = (15, 110, 60, 255)
-        cond_color = (25, 130, 70, 255)
-        border_color = (35, 155, 85, 255)
+        badge_fill = (240, 248, 242, 255)
+        text_color = (20, 75, 30, 255)
+        cond_color = (35, 115, 45, 255)
+        border_color = (140, 195, 145, 255)
     else:
-        header_text = "📦 البائع: Amazon.eg"
+        header_text = "البائع: Amazon.eg"
         cond_text = None
-        badge_fill = (240, 244, 252, 255)
-        text_color = (20, 55, 100, 255)
+        badge_fill = (242, 246, 252, 255)
+        text_color = (0, 69, 124, 255)
         cond_color = None
-        border_color = (175, 195, 225, 255)
+        border_color = (180, 205, 235, 255)
 
     font_size = _scaled(int(_TITLE_FONT_MAX * 0.44), scale)
     font_header = _load_title_font(font_size, title=header_text)
     font_cond = _load_title_font(int(font_size * 0.9), title=cond_text or "") if cond_text else None
 
-    pad_x = _scaled(20, scale)
+    pad_x = _scaled(22, scale)
     pad_y = _scaled(10, scale)
     gap_y = _scaled(4, scale)
     radius = _scaled(14, scale)
@@ -1011,8 +1012,22 @@ def draw_seller_badge(
     y1 = y
     y2 = y1 + box_h
 
+    # Subtle ambient drop shadow
+    shadow_y = max(1, _scaled(2, scale))
+    draw.rounded_rectangle(
+        (x1, y1 + shadow_y, x2, y2 + shadow_y),
+        radius=radius,
+        fill=(0, 0, 0, 14),
+    )
+
     # Draw rounded rectangle badge with subtle border
-    draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=badge_fill, outline=border_color, width=max(1, _scaled(2, scale)))
+    draw.rounded_rectangle(
+        (x1, y1, x2, y2),
+        radius=radius,
+        fill=badge_fill,
+        outline=border_color,
+        width=max(1, _scaled(1.5, scale)),
+    )
     
     header_x = x1 + (box_w - tb_w1) // 2
     _draw_text(draw, (header_x, y1 + pad_y), header_text, font_header, text_color)
@@ -1285,17 +1300,24 @@ def draw_old_price(
     _draw_text(draw, (number_x, y), number_text, font, _GRAY_TEXT)
     _draw_text(draw, (currency_x, y), currency_text, font, _GRAY_TEXT)
 
-    strike_y = y + number_h // 2 + _scaled(20, scale)
+    # Exact strikethrough alignment through vertical center of digits
+    num_disp = shape_text(number_text)
+    if hasattr(draw, "textbbox"):
+        nb = draw.textbbox((0, 0), num_disp, font=font)
+        strike_y = y + (nb[1] + nb[3]) // 2
+    else:
+        strike_y = y + number_h // 2
 
+    strike_pad = _scaled(2, scale)
     draw.line(
         (
-            number_x,
+            number_x - strike_pad,
             strike_y,
-            number_x + number_w,
+            number_x + number_w + strike_pad,
             strike_y,
         ),
         fill=_GRAY_TEXT,
-        width=max(1, _scaled(_OLD_PRICE_STRIKE_WIDTH, scale)),
+        width=max(2, _scaled(_OLD_PRICE_STRIKE_WIDTH, scale)),
     )
 
     return y + max(label_h, number_h, currency_h)
@@ -1309,7 +1331,7 @@ def draw_price_card(
     panel_width: int,
     rtl: bool,
     scale: float,
-) -> int:
+) -> tuple[int, tuple[int, int, int, int]]:
     layout = _layout_price_card_inner(draw, price, panel_width, scale)
 
     if rtl:
@@ -1321,10 +1343,21 @@ def draw_price_card(
     box_y1 = y
     box_y2 = box_y1 + layout.box_h
 
+    # Soft ambient drop shadow for subtle depth
+    shadow_y = max(2, _scaled(4, scale))
+    draw.rounded_rectangle(
+        (box_x1 + 1, box_y1 + shadow_y, box_x2 + 1, box_y2 + shadow_y),
+        radius=layout.radius,
+        fill=(0, 0, 0, 18),
+    )
+
+    # Main yellow card with crisp border
     draw.rounded_rectangle(
         (box_x1, box_y1, box_x2, box_y2),
         radius=layout.radius,
         fill=_AMAZON_YELLOW,
+        outline=_AMAZON_YELLOW_BORDER,
+        width=max(1, _scaled(1, scale)),
     )
 
     inner_h = layout.box_h - layout.pad_y * 2
@@ -1375,7 +1408,7 @@ def draw_discount_badge(
         return None
 
     draw = ImageDraw.Draw(canvas)
-    font = _load_ui_font(_scaled(_DISCOUNT_BADGE_FONT, scale), discount_text, bold=False)
+    font = _load_ui_font(_scaled(_DISCOUNT_BADGE_FONT, scale), discount_text, bold=True)
     text_w, text_h = _text_bbox(draw, discount_text, font)
     pad_x = _scaled(_DISCOUNT_BADGE_PAD_X, scale)
     pad_y = _scaled(_DISCOUNT_BADGE_PAD_Y, scale)
@@ -1406,7 +1439,7 @@ def draw_prime_badge(
 ) -> None:
     draw = ImageDraw.Draw(canvas)
     text = "prime"
-    font = _load_ui_font(_scaled(_PRIME_BADGE_FONT, scale), text, bold=False)
+    font = _load_ui_font(_scaled(_PRIME_BADGE_FONT, scale), text, bold=True)
     text_w, _ = _text_bbox(draw, text, font)
     pad_x = _scaled(_PRIME_BADGE_PAD_X, scale)
     pad_y = _scaled(_PRIME_BADGE_PAD_Y, scale)
@@ -1423,7 +1456,7 @@ def draw_prime_badge(
         pad_y=pad_y,
         radius=_scaled(_PRIME_BADGE_RADIUS, scale),
         fill=_PRIME_BLUE_LIGHT,
-        text_color=(255, 255, 255, 220),
+        text_color=(255, 255, 255, 255),
     )
 
 
@@ -1548,7 +1581,7 @@ def _discount_badge_text(price: str | None, list_price: str | None) -> str | Non
     discount = _discount_percent(price, list_price)
     if discount is None:
         return None
-    return f"🔥 خصم {discount}%"
+    return f"خصم {discount}%"
 
 
 def _draw_pill_badge(
@@ -1570,8 +1603,23 @@ def _draw_pill_badge(
     box_h = text_h + pad_y * 2
     x1, y1 = anchor_x, anchor_y
     x2, y2 = x1 + box_w, y1 + box_h
+
+    # Subtle drop shadow
+    draw.rounded_rectangle(
+        (x1 + 1, y1 + 2, x2 + 1, y2 + 3),
+        radius=radius,
+        fill=(0, 0, 0, 20),
+    )
+
     draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=fill)
-    _draw_text(draw, (x1 + pad_x, y1 + pad_y), text, font, text_color)
+    
+    # Exact vertical centering
+    t_bbox = _text_origin_bbox(draw, text, font)
+    actual_t_h = t_bbox[3] - t_bbox[1]
+    ty = y1 + (box_h - actual_t_h) // 2 - t_bbox[1]
+    tx = x1 + (box_w - text_w) // 2
+
+    _draw_text(draw, (tx, ty), text, font, text_color)
     return x1, y1, x2, y2
 
 

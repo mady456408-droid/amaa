@@ -54,6 +54,7 @@ from link_resolver import (
     extract_asin,
     get_message_text,
     init_http_client,
+    resolve_product_input,
     resolve_redirect,
 )
 from telegram_listener import start_telethon_listener, stop_telethon_listener
@@ -91,33 +92,30 @@ async def validate_and_fetch_url(
     try:
         logger.info("VALIDATING URL %s: %s", index, url)
 
-        seller_type = "AMAZON_RESALE" if ("A2N2MP47XAP1MK" in url or "m=A2N2MP47XAP1MK" in url) else "NEW_AMAZON"
-
-        asin = extract_asin(url)
-        if asin:
-            logger.info("ASIN in URL — skip HTTP redirect")
-        else:
-            final_url = await resolve_redirect(url)
-            logger.info("REDIRECT RESOLVED: %s", final_url)
-            if "A2N2MP47XAP1MK" in final_url or "m=A2N2MP47XAP1MK" in final_url:
-                seller_type = "AMAZON_RESALE"
-            asin = extract_asin(final_url)
-
-        if not asin:
-            logger.warning("URL FAILED — no ASIN for %s", url)
+        resolved = await resolve_product_input(url, AMAZON_DOMAIN)
+        if not resolved:
+            logger.warning("URL FAILED — no valid product resolution for %s", url)
             return None
 
-        logger.info("ASIN FOUND: %s seller_type=%s", asin, seller_type)
+        asin = resolved.asin
+        clean_url = resolved.clean_url
+        seller_type = resolved.seller_type
+        merchant_id = resolved.merchant_id or ("A2N2MP47XAP1MK" if seller_type == "AMAZON_RESALE" else "A1ZVRGNO5AYLOV")
 
-        merchant_id = "A2N2MP47XAP1MK" if seller_type == "AMAZON_RESALE" else "A1ZVRGNO5AYLOV"
-        clean_url = build_clean_url(asin, AMAZON_DOMAIN, merchant_id=merchant_id if seller_type == "AMAZON_RESALE" else None)
         scrape_asin = f"{asin}_{message_id}_{index}"
         coupon_enabled = db.get_coupon_detection_enabled()
 
-        if seller_type == "AMAZON_RESALE":
-            logger.info("RESALE PUBLISH START asin=%s merchant_id=%s", asin, merchant_id)
-        else:
-            logger.info("NEW PUBLISH START asin=%s merchant_id=%s", asin, merchant_id)
+        logger.info(
+            "SOURCE POST RESOLUTION:\n"
+            "  asin=%s\n"
+            "  seller_type=%s\n"
+            "  merchant_id=%s\n"
+            "  clean_url=%s",
+            asin,
+            seller_type,
+            merchant_id,
+            clean_url,
+        )
 
         product = await fetch_product(
             db,

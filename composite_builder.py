@@ -7,7 +7,7 @@ from image_processor import CreatorsProductCard, apply_frame_creators_products
 from creators_title import resolve_frame_title
 from amazon_shortener import shorten_amazon_url
 from product_fetcher import fetch_product, fetch_products, resolve_display_url
-from link_resolver import build_clean_url, extract_asin, resolve_redirect, is_standalone_asin
+from link_resolver import build_clean_url, extract_asin, is_standalone_asin, resolve_product_input, resolve_redirect
 from config import AMAZON_DOMAIN
 from file_cleanup import cleanup_files
 
@@ -22,37 +22,11 @@ def _valid_price(text: str | None) -> bool:
 
 
 async def resolve_asin_from_url(item: str) -> tuple[str, str] | None:
-    """Return (asin, clean_url) from URL, redirect URL, or plain ASIN."""
-    logger.info("RESOLVING URL: %s", item)
-
-    # Check if input is already a plain ASIN
-    asin = is_standalone_asin(item)
-    if asin:
-        logger.info("PLAIN ASIN DETECTED: %s", asin)
-        return asin, build_clean_url(asin, AMAZON_DOMAIN)
-
-    # Try to extract ASIN from URL
-    asin = extract_asin(item)
-    if asin:
-        logger.info("ASIN EXTRACTED: %s", asin)
-        return asin, build_clean_url(asin, AMAZON_DOMAIN)
-
-    # Try to resolve redirect
-    try:
-        final_url = await resolve_redirect(item)
-    except Exception:
-        logger.exception("REDIRECT RESOLVED: %s -> failed", item)
+    """Return (asin, clean_url) from URL, redirect URL, or plain ASIN using central resolver."""
+    resolved = await resolve_product_input(item, AMAZON_DOMAIN)
+    if not resolved:
         return None
-
-    logger.info("REDIRECT RESOLVED: %s -> %s", item, final_url)
-
-    asin = extract_asin(final_url)
-    if not asin:
-        logger.warning("ASIN extraction failed after redirect: %s", final_url)
-        return None
-
-    logger.info("ASIN EXTRACTED: %s", asin)
-    return asin, build_clean_url(asin, AMAZON_DOMAIN)
+    return resolved.asin, resolved.clean_url
 
 
 async def fetch_composite_entries(
