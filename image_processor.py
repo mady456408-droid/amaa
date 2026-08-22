@@ -309,12 +309,16 @@ def apply_frame_creators_product(
     image_path: str,
     output_path: str,
     *,
+    asin: str | None = None,
     title: str | None = None,
     price: str | None = None,
     list_price: str | None = None,
     prime_exclusive: bool = False,
     seller_name: str | None = None,
     seller_condition: str | None = None,
+    seller_type: str = "NEW_AMAZON",
+    merchant_id: str | None = None,
+    **kwargs,
 ) -> str:
     """
     Premium Creators API product card: info panel left, product image right.

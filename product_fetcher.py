@@ -733,22 +733,30 @@ async def fetch_product(
                 seller_type,
             )
             return product
-        except RuntimeError:
+        except (TypeError, AttributeError, NameError, KeyError, IndexError) as exc:
+            logger.error(
+                "CREATORS API CODE BUG — unexpected programming error (not an API failure) asin=%s error=%r",
+                asin,
+                exc,
+                exc_info=True,
+            )
             raise
         except CreatorsAPIError as exc:
             if seller_type == "AMAZON_RESALE":
                 logger.warning("RESALE CREATORS API FAILED\n  error=%s", exc)
+            logger.info("CREATORS API FALLBACK reason=creators_api_error error=%s asin=%s", exc, asin)
             _log_creators_fallback(asin, exc)
         except Exception as exc:
             if seller_type == "AMAZON_RESALE":
                 logger.warning("RESALE CREATORS API FAILED\n  error=%s", exc)
-            logger.exception("CREATORS API FALLBACK — unexpected error")
+            logger.info("CREATORS API FALLBACK reason=unexpected_network_or_api_error error=%s asin=%s", exc, asin)
+            _log_creators_fallback(asin, exc)
 
     # Full Playwright fallback (transparent to user).
     if browser is None:
         raise RuntimeError("Playwright browser not available and Creators API failed")
 
-    logger.info("CREATORS API FALLBACK — full Playwright scrape asin=%s", asin)
+    logger.info("CREATORS API FALLBACK reason=creators_api_unavailable_or_failed asin=%s — starting Playwright scrape", asin)
     product = await scrape_amazon(
         browser,
         clean_url,
