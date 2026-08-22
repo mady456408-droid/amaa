@@ -311,6 +311,7 @@ class NormalizedItem:
             "list_price": self.list_price,
             "prime_exclusive": self.prime_exclusive,
             "seller_name": self.seller_name,
+            "raw_listings": self.raw_listings,
         }
 
     @classmethod
@@ -325,6 +326,7 @@ class NormalizedItem:
             list_price=data.get("list_price"),
             prime_exclusive=bool(data.get("prime_exclusive")),
             seller_name=data.get("seller_name"),
+            raw_listings=list(data.get("raw_listings") or []),
         )
 
 
@@ -852,10 +854,11 @@ class CreatorsClient:
         *,
         db=None,
         profile: str = "draft",
+        bypass_cache: bool = False,
     ) -> dict[str, NormalizedItem]:
         """
         Fetch 1–10 ASINs. Returns map asin -> NormalizedItem.
-        Uses SQLite cache when db is provided.
+        Uses SQLite cache when db is provided unless bypass_cache is True.
         """
         if not asins:
             return {}
@@ -870,7 +873,7 @@ class CreatorsClient:
         results: dict[str, NormalizedItem] = {}
         missing: list[str] = []
 
-        if db is not None:
+        if db is not None and not bypass_cache:
             for asin in normalized_asins:
                 cached = db.get_creators_cache(asin, profile)
                 if cached:
@@ -882,6 +885,8 @@ class CreatorsClient:
                 logger.info("CREATORS CACHE MISS asin=%s profile=%s", asin, profile)
                 missing.append(asin)
         else:
+            if bypass_cache:
+                logger.info("CREATORS CACHE BYPASS asins=%s profile=%s", normalized_asins, profile)
             missing = list(normalized_asins)
 
         source_label = "MONITOR" if profile == "price_drop" else "REALTIME"

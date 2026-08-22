@@ -613,13 +613,72 @@ async def fetch_product(
                 AMAZON_RESALE_SELLER_ID,
             )
         try:
+            cache_hit = bool(db is not None and db.get_creators_cache(asin.upper(), "draft"))
+
             items = await client.get_items(
                 [asin],
                 DRAFT_PROFILE,
                 db=db,
                 profile="draft",
+                bypass_cache=False,
             )
             item = items.get(asin.upper())
+
+            if seller_type == "AMAZON_RESALE":
+                status, p_text, p_val, l_text, l_val, s_name, s_cond = (
+                    extract_seller_offer(item, "AMAZON_RESALE") if item else ("MISSING", None, None, None, None, None, None)
+                )
+                cached_offer_found = (status == "AVAILABLE")
+
+                logger.info(
+                    "RESALE CACHE CHECK:\n"
+                    "  asin=%s\n"
+                    "  cache_hit=%s\n"
+                    "  merchant_id=%s\n"
+                    "  cached_offer_found=%s",
+                    asin.upper(),
+                    cache_hit,
+                    AMAZON_RESALE_SELLER_ID,
+                    cached_offer_found,
+                )
+
+                if cache_hit and not cached_offer_found:
+                    logger.info(
+                        "RESALE CACHE REFRESH:\n"
+                        "  asin=%s\n"
+                        "  reason=cached_merchant_missing",
+                        asin.upper(),
+                    )
+                    items = await client.get_items(
+                        [asin],
+                        DRAFT_PROFILE,
+                        db=db,
+                        profile="draft",
+                        bypass_cache=True,
+                    )
+                    item = items.get(asin.upper())
+                    status, p_text, p_val, l_text, l_val, s_name, s_cond = (
+                        extract_seller_offer(item, "AMAZON_RESALE") if item else ("MISSING", None, None, None, None, None, None)
+                    )
+
+                logger.info(
+                    "RESALE LIVE CHECK:\n"
+                    "  asin=%s\n"
+                    "  merchant_id=%s\n"
+                    "  offer_found=%s\n"
+                    "  price=%s\n"
+                    "  availability=%s",
+                    asin.upper(),
+                    AMAZON_RESALE_SELLER_ID,
+                    (status == "AVAILABLE"),
+                    p_text or "None",
+                    status,
+                )
+            else:
+                status, p_text, p_val, l_text, l_val, s_name, s_cond = (
+                    extract_seller_offer(item, seller_type) if item else ("MISSING", None, None, None, None, None, None)
+                )
+
             if not item or item.title == "Not found":
                 if seller_type == "AMAZON_RESALE":
                     logger.warning("RESALE OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin.upper())
