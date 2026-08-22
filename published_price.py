@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from coupon_price import parse_price_number
+
+logger = logging.getLogger(__name__)
 
 _NUMBER_EMOJIS = (
     "1️⃣",
