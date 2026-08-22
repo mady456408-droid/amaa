@@ -48,23 +48,54 @@ def build_caption(
     return "\n".join(lines)
 
 
+def format_resale_condition_arabic(seller_condition: str | None = None) -> str:
+    """
+    Format exact Amazon condition to natural Arabic for Amazon Resale posts.
+    
+    Preserves exact condition mappings:
+    - Used - Like New -> "مستعمل - كالجديد"
+    - Used - Very Good -> "مستعمل - جيد جدًا"
+    - Used - Good -> "مستعمل - جيد"
+    - Used - Acceptable -> "مستعمل - مقبول"
+    
+    If condition is unknown or empty:
+    - "♻️ المنتج من Amazon Resale وهو مستعمل"
+    """
+    if not seller_condition:
+        return "♻️ المنتج من Amazon Resale وهو مستعمل"
+    
+    cond_raw = seller_condition.strip()
+    cond_lower = cond_raw.lower()
+    
+    if "like new" in cond_lower or "كالجديد" in cond_lower:
+        return "♻️ المنتج مستعمل - كالجديد"
+    elif "very good" in cond_lower or "جيد جدا" in cond_lower or "جيد جدًا" in cond_lower:
+        return "♻️ المنتج مستعمل - جيد جدًا"
+    elif "acceptable" in cond_lower or "مقبول" in cond_lower:
+        return "♻️ المنتج مستعمل - مقبول"
+    elif "good" in cond_lower or "جيد" in cond_lower:
+        return "♻️ المنتج مستعمل - جيد"
+    elif "مستعمل" in cond_raw:
+        return f"♻️ {cond_raw}"
+    else:
+        return "♻️ المنتج من Amazon Resale وهو مستعمل"
+
+
 def build_resale_caption(
     title: str,
     price: str,
     resale_url: str,
     seller_condition: str | None = None,
 ) -> str:
-    """Build caption for Amazon Resale posts."""
-    cond_str = seller_condition.strip() if seller_condition else "Used / Amazon Resale"
-    if "مستعمل" not in cond_str and "Used" not in cond_str:
-        cond_str = f"Used / {cond_str}"
+    """Build caption for Amazon Resale posts with explicit Arabic used/pre-owned condition."""
+    condition_phrase = format_resale_condition_arabic(seller_condition)
     lines = [
         "♻️ <b>Amazon Resale</b>",
+        f"<b>{condition_phrase}</b>",
         "",
         f"📦 <b>{title}</b>",
         "",
         f"💰 <b>بسعر {price}</b>",
-        f"📦 <b>الحالة:</b> {cond_str}",
         "",
         "🔗 <b>شوف العرض:</b>",
         resale_url,

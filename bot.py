@@ -226,7 +226,13 @@ async def publish_validated_product(
         # Provider enable/disable is handled by ai_rewriter.py
         if apply_ai_rewrite:
             logger.info("SOURCE POST → CALLING AI REWRITE FUNCTION")
-            caption = rewrite_caption(caption, db, log_prefix="SOURCE POST")
+            caption = rewrite_caption(
+                caption,
+                db,
+                log_prefix="SOURCE POST",
+                seller_type=seller_type,
+                seller_condition=product.get("seller_condition"),
+            )
 
         upload_image = to_jpeg_for_telegram(product["screenshot"])
         if upload_image != product["screenshot"]:

@@ -169,14 +169,25 @@ def generate_price_chart_image(
         prices = []
         for r in sorted_recs:
             raw_dt = r.get("recorded_at") or ""
+            p_raw = r.get("final_price")
+            if p_raw is None:
+                p_raw = r.get("price_value")
+            try:
+                p_val = float(p_raw) if p_raw is not None else 0.0
+            except (ValueError, TypeError):
+                p_val = 0.0
+
+            if p_val <= 0:
+                continue
+
             try:
                 dt = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
                 dates.append(dt.strftime("%d %b %H:%M"))
             except Exception:
-                dates.append(raw_dt[:10] if raw_dt else "")
-            prices.append(float(r.get("final_price") or 0.0))
+                dates.append(raw_dt[:10] if raw_dt else "N/A")
+            prices.append(p_val)
 
-        if not prices:
+        if not prices or len(prices) < 2:
             return None
 
         fig, ax = plt.subplots(figsize=(8, 4.5), dpi=150)
@@ -210,7 +221,8 @@ def generate_price_chart_image(
         fig.savefig(out_path, facecolor=fig.get_facecolor(), edgecolor="none")
         plt.close(fig)
         return out_path
-    except Exception:
+    except Exception as exc:
+        logger.error("CHART RENDER ERROR asin=%s error_type=%s error=%s", asin, type(exc).__name__, exc, exc_info=True)
         return None
 
 
@@ -257,21 +269,24 @@ def format_resale_smart_restock_message(
     reference_price: float,
     previous_price: float | None = None,
     currency: str = "EGP",
+    seller_condition: str | None = None,
     product_url: str | None = None,
 ) -> str:
+    from telegram_publisher import format_resale_condition_arabic
     ref_discount = reference_price - current_price
     ref_pct = (ref_discount / reference_price * 100.0) if reference_price > 0 else 0.0
 
     curr_fmt = format_currency_amount(current_price, currency)
     ref_fmt = format_currency_amount(reference_price, currency)
+    cond_phrase = format_resale_condition_arabic(seller_condition)
 
     lines = [
         "♻️ <b>Amazon Resale — رجع متاح بسعر ممتاز!</b>\n",
+        f"<b>{cond_phrase}</b>",
         f"📦 <b>{short_title(title, 80)}</b>\n",
         f"💰 <b>سعر Resale الحالي:</b> {curr_fmt}",
         f"📊 <b>السعر المرجعي لـ Resale:</b> {ref_fmt}",
         f"🔥 <b>أقل من المرجع بـ</b> {ref_pct:.1f}%",
-        "📦 <b>الحالة:</b> Used / Amazon Resale",
     ]
 
     if previous_price is not None and previous_price > 0:
@@ -341,15 +356,18 @@ def format_resale_price_drop_message(
     current_price: float,
     previous_price: float,
     currency: str = "EGP",
+    seller_condition: str | None = None,
     stats: dict[str, Any] | None = None,
     product_url: str | None = None,
 ) -> str:
+    from telegram_publisher import format_resale_condition_arabic
     savings = previous_price - current_price
     drop_pct = (savings / previous_price * 100.0) if previous_price > 0 else 0.0
 
     curr_fmt = format_currency_amount(current_price, currency)
     prev_fmt = format_currency_amount(previous_price, currency)
     savings_fmt = format_currency_amount(savings, currency)
+    cond_phrase = format_resale_condition_arabic(seller_condition)
 
     if drop_pct >= 10.0:
         header = "🔥 <b>Amazon Resale — تخفيض قوي!</b>\n"
@@ -360,12 +378,12 @@ def format_resale_price_drop_message(
 
     lines = [
         header,
+        f"<b>{cond_phrase}</b>",
         f"📦 <b>{short_title(title, 80)}</b>\n",
         f"💰 <b>السعر الحالي:</b> {curr_fmt}",
         f"📉 <b>كان:</b> {prev_fmt}",
         f"💵 <b>وفرت:</b> {savings_fmt}",
-        f"📊 <b>انخفاض:</b> {drop_pct:.1f}%",
-        "📦 <b>الحالة:</b> Used / Amazon Resale\n",
+        f"📊 <b>انخفاض:</b> {drop_pct:.1f}%\n",
     ]
 
     if stats and stats.get("has_data"):
@@ -400,13 +418,17 @@ def format_resale_restock_message(
     previous_price: float,
     reference_price: float | None = None,
     currency: str = "EGP",
+    seller_condition: str | None = None,
     stats: dict[str, Any] | None = None,
     product_url: str | None = None,
 ) -> str:
+    from telegram_publisher import format_resale_condition_arabic
     curr_fmt = format_currency_amount(current_price, currency)
+    cond_phrase = format_resale_condition_arabic(seller_condition)
 
     lines = [
         "♻️ <b>Amazon Resale رجع!</b>\n",
+        f"<b>{cond_phrase}</b>",
         f"📦 <b>{short_title(title, 80)}</b>\n",
         f"💰 <b>السعر الحالي:</b> {curr_fmt}",
     ]
@@ -429,9 +451,9 @@ def format_resale_restock_message(
                 f"📊 <b>انخفاض:</b> {drop_pct:.1f}%\n",
             ])
         else:
-            lines.append("📦 <b>الحالة:</b> Used / Amazon Resale\n")
+            lines.append("")
     else:
-        lines.append("📦 <b>الحالة:</b> Used / Amazon Resale\n")
+        lines.append("")
 
     if stats and stats.get("has_data") and stats.get("is_lowest"):
         lines.append("🏷️ <b>تنويه:</b> هذا السعر هو أقل سعر مسجل بالمرصد حتى الآن.")

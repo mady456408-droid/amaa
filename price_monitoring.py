@@ -1545,9 +1545,52 @@ async def republish_published_product(application: Any, published_id: int) -> st
         raise RuntimeError("Published product not found")
 
     asin = row["asin"]
-    seller_type = row.get("seller_type") or "NEW_AMAZON"
-    merchant_id = AMAZON_RESALE_SELLER_ID if seller_type == "AMAZON_RESALE" else NEW_AMAZON_SELLER_ID
-    clean_url = build_clean_url(asin, AMAZON_DOMAIN, merchant_id=merchant_id if seller_type == "AMAZON_RESALE" else None)
+    stored_seller_type = row.get("seller_type")
+    stored_clean_url = row.get("clean_url") or build_clean_url(
+        asin,
+        AMAZON_DOMAIN,
+        merchant_id=AMAZON_RESALE_SELLER_ID if stored_seller_type == "AMAZON_RESALE" else None,
+    )
+    callback_seller_type = stored_seller_type
+
+    if stored_seller_type not in ("AMAZON_RESALE", "NEW_AMAZON"):
+        logger.error(
+            "REPUBLISH INVALID SELLER TYPE:\n"
+            "  published_id=%s\n"
+            "  asin=%s\n"
+            "  stored_seller_type=%s",
+            published_id,
+            asin,
+            stored_seller_type,
+        )
+        return f"❌ Invalid or missing seller_type ('{stored_seller_type}') for published product {published_id}"
+
+    resolved_seller_type = stored_seller_type
+    resolved_merchant_id = (
+        AMAZON_RESALE_SELLER_ID if resolved_seller_type == "AMAZON_RESALE" else NEW_AMAZON_SELLER_ID
+    )
+
+    logger.info(
+        "REPUBLISH SELLER RESOLUTION:\n"
+        "  published_id=%s\n"
+        "  asin=%s\n"
+        "  stored_seller_type=%s\n"
+        "  callback_seller_type=%s\n"
+        "  resolved_seller_type=%s\n"
+        "  resolved_merchant_id=%s\n"
+        "  stored_clean_url=%s",
+        published_id,
+        asin,
+        stored_seller_type,
+        callback_seller_type,
+        resolved_seller_type,
+        resolved_merchant_id,
+        stored_clean_url,
+    )
+
+    seller_type = resolved_seller_type
+    merchant_id = resolved_merchant_id
+    clean_url = stored_clean_url
     scrape_key = f"republish_{published_id}_{asin}"
     coupon_enabled = db.get_coupon_detection_enabled()
     temp_files: list[str] = []
@@ -1773,7 +1816,13 @@ async def republish_published_product(application: Any, published_id: int) -> st
 
         if apply_ai_rewrite:
             logger.info("REPUBLISH → CALLING AI REWRITE FUNCTION")
-            caption = rewrite_caption(caption, db, log_prefix="REPUBLISH")
+            caption = rewrite_caption(
+                caption,
+                db,
+                log_prefix="REPUBLISH",
+                seller_type=seller_type,
+                seller_condition=product.get("seller_condition"),
+            )
 
         upload_image = to_jpeg_for_telegram(product["screenshot"])
         if upload_image != product["screenshot"]:
@@ -2033,36 +2082,139 @@ async def handle_price_history_view(
 async def handle_price_chart_view(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Generate and send matplotlib price chart image for an ASIN."""
+    """Generate and send matplotlib price chart image for an ASIN/published_id with strict seller isolation."""
     query = update.callback_query
     user = update.effective_user
     if not is_admin(user.id if user else None):
         await query.answer("Unauthorized", show_alert=True)
         return
 
-    asin = (query.data or "").replace(CB_PRICE_CHART_VIEW, "").strip().upper()
+    raw_payload = (query.data or "").replace(CB_PRICE_CHART_VIEW, "").strip()
     await query.answer("Generating price chart…")
-
     db = _db(context)
-    records = db.get_price_history_records(asin, seller_type="NEW_AMAZON", limit=100)
 
-    if not records or len(records) < 2:
+    published_id: int | None = None
+    asin: str = ""
+    seller_type: str = "NEW_AMAZON"
+    p_row: dict[str, Any] | None = None
+
+    if raw_payload.isdigit():
+        published_id = int(raw_payload)
+        p_row = db.get_published_product(published_id)
+        if p_row:
+            asin = p_row["asin"].upper()
+            seller_type = p_row.get("seller_type") or "NEW_AMAZON"
+        else:
+            await query.message.reply_text(
+                f"❌ Published product {published_id} not found",
+                parse_mode="HTML",
+            )
+            return
+    elif ":" in raw_payload:
+        parts = raw_payload.split(":", 1)
+        asin = parts[0].strip().upper()
+        seller_type = parts[1].strip()
+        p_row = db.get_published_product_by_asin(asin)
+        if p_row:
+            published_id = p_row.get("id")
+    else:
+        asin = raw_payload.strip().upper()
+        p_row = db.get_published_product_by_asin(asin)
+        if p_row:
+            published_id = p_row.get("id")
+            seller_type = p_row.get("seller_type") or "NEW_AMAZON"
+
+    if seller_type not in ("AMAZON_RESALE", "NEW_AMAZON"):
+        seller_type = "NEW_AMAZON"
+
+    merchant_id = AMAZON_RESALE_SELLER_ID if seller_type == "AMAZON_RESALE" else NEW_AMAZON_SELLER_ID
+
+    logger.info(
+        "PRICE CHART START\n"
+        "  published_id=%s\n"
+        "  asin=%s\n"
+        "  seller_type=%s\n"
+        "  merchant_id=%s",
+        published_id,
+        asin,
+        seller_type,
+        merchant_id,
+    )
+
+    records = db.get_price_history_records(asin, seller_type=seller_type, limit=100)
+
+    valid_prices = []
+    for r in records:
+        try:
+            p = float(r.get("final_price") or 0.0)
+            if p > 0:
+                valid_prices.append(p)
+        except (ValueError, TypeError):
+            pass
+
+    sorted_recs = sorted(records, key=lambda r: r.get("recorded_at") or "")
+    first_ts = sorted_recs[0].get("recorded_at") if sorted_recs else None
+    last_ts = sorted_recs[-1].get("recorded_at") if sorted_recs else None
+    min_p = min(valid_prices) if valid_prices else None
+    max_p = max(valid_prices) if valid_prices else None
+
+    logger.info(
+        "PRICE CHART DATA\n"
+        "  history_count=%s\n"
+        "  first_timestamp=%s\n"
+        "  last_timestamp=%s\n"
+        "  min_price=%s\n"
+        "  max_price=%s",
+        len(records),
+        first_ts,
+        last_ts,
+        min_p,
+        max_p,
+    )
+
+    if not records or len(records) == 0:
+        await query.message.reply_text(
+            f"ℹ️ No price history available for {seller_type} on ASIN <code>{asin}</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    if len(records) < 2 or not valid_prices:
         await query.message.reply_text(
             f"ℹ️ Not enough history data to generate chart for ASIN <code>{asin}</code> (at least 2 price checks required).",
             parse_mode="HTML",
         )
         return
 
-    chart_path = generate_price_chart_image(asin, asin, records)
-    if not chart_path or not os.path.exists(chart_path):
-        await query.message.reply_text("❌ Failed to generate price chart.")
+    product_title = (p_row.get("title") if p_row else None) or asin
+    try:
+        chart_path = generate_price_chart_image(asin, product_title, records)
+        if not chart_path or not os.path.exists(chart_path):
+            raise RuntimeError("Chart image generation returned empty path")
+    except Exception as exc:
+        logger.error(
+            "PRICE CHART ERROR\n"
+            "  asin=%s\n"
+            "  seller_type=%s\n"
+            "  error_type=%s\n"
+            "  error=%s",
+            asin,
+            seller_type,
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        await query.message.reply_text(
+            f"❌ Failed to generate price chart: {exc}",
+            parse_mode="HTML",
+        )
         return
 
     try:
         with open(chart_path, "rb") as photo:
             await query.message.reply_photo(
                 photo=photo,
-                caption=f"📈 <b>Price History Chart — {asin}</b>",
+                caption=f"📈 <b>Price History Chart — {asin} ({seller_type})</b>",
                 parse_mode="HTML",
             )
     finally:

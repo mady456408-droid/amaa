@@ -203,6 +203,7 @@ class Database:
                 ("last_checked_at", "TEXT"),
                 ("destination_id", "INTEGER"),
                 ("seller_type", "TEXT NOT NULL DEFAULT 'NEW_AMAZON'"),
+                ("clean_url", "TEXT"),
                 ("image_path", "TEXT"),
             ):
                 if col not in published_cols:
@@ -841,6 +842,7 @@ class Database:
         published_currency: str | None = None,
         seller_type: str = "NEW_AMAZON",
         image_path: str | None = None,
+        clean_url: str | None = None,
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
@@ -849,8 +851,8 @@ class Database:
                 INSERT INTO published_products
                     (asin, title, source_channel_id, destination_message_id, published_at,
                      destination_id, published_price, published_price_value, published_list_price,
-                     published_list_price_value, published_currency, seller_type, image_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     published_list_price_value, published_currency, seller_type, image_path, clean_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     asin.upper(),
@@ -866,6 +868,7 @@ class Database:
                     published_currency,
                     seller_type,
                     image_path,
+                    clean_url,
                 ),
             )
             conn.commit()
@@ -942,6 +945,7 @@ class Database:
         published_currency: str | None,
         seller_type: str | None = None,
         image_path: str | None = None,
+        clean_url: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
@@ -950,8 +954,9 @@ class Database:
                 (published_id,),
             ).fetchone()
 
-            stype = seller_type or (dict(current).get("seller_type") if current else "NEW_AMAZON")
+            stype = seller_type or (dict(current).get("seller_type") if current else None)
             img = image_path or (dict(current).get("image_path") if current else None)
+            curl = clean_url or (dict(current).get("clean_url") if current else None)
 
             if current:
                 conn.execute(
@@ -972,7 +977,8 @@ class Database:
                         published_list_price_value = ?,
                         published_currency = ?,
                         seller_type = ?,
-                        image_path = ?
+                        image_path = ?,
+                        clean_url = ?
                     WHERE id = ?
                     """,
                     (
@@ -988,6 +994,7 @@ class Database:
                         published_currency,
                         stype,
                         img,
+                        curl,
                         published_id,
                     ),
                 )
@@ -1005,7 +1012,8 @@ class Database:
                         published_list_price = ?,
                         published_list_price_value = ?,
                         published_currency = ?,
-                        seller_type = ?
+                        seller_type = ?,
+                        clean_url = ?
                     WHERE id = ?
                     """,
                     (
@@ -1020,6 +1028,7 @@ class Database:
                         published_list_price_value,
                         published_currency,
                         stype,
+                        curl,
                         published_id,
                     ),
                 )
@@ -1057,9 +1066,9 @@ class Database:
     def add_price_history_record(
         self,
         asin: str,
-        price: str | None,
-        price_value: float | None,
-        final_price: float,
+        price: str | None = None,
+        price_value: float | None = None,
+        final_price: float = 0.0,
         *,
         tracked_product_id: int | None = None,
         list_price: str | None = None,

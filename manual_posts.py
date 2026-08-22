@@ -779,7 +779,7 @@ async def handle_publish_draft(
         )
         if apply_ai_rewrite:
             logger.info("MANUAL POST → CALLING AI REWRITE FUNCTION")
-            caption = rewrite_caption(caption, db, log_prefix="MANUAL POST")
+            caption = rewrite_caption(caption, db, log_prefix="MANUAL POST", seller_type=seller_type)
 
         # Get enabled destinations
         destinations = db.get_enabled_destinations()

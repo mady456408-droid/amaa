@@ -951,17 +951,17 @@ def _seller_line_height(
 ) -> int:
     """Calculate height of seller badge with condition lines."""
     is_resale = "RESALE" in seller_name.upper() or "مستعمل" in seller_name
-    font_size = _scaled(int(_TITLE_FONT_MAX * 0.44), scale)
+    font_size = _scaled(int(_TITLE_FONT_MAX * (0.51 if is_resale else 0.44)), scale)
     font_header = _load_title_font(font_size, title="Amazon Resale" if is_resale else "البائع: Amazon.eg")
     if font_header is None:
         return 0
-    pad_y = _scaled(10, scale)
+    pad_y = _scaled(12 if is_resale else 10, scale)
     if is_resale:
         cond_text = _format_resale_condition_display(seller_condition)
         font_cond = _load_title_font(int(font_size * 0.9), title=cond_text)
         tb_h1 = _text_bbox(draw, "Amazon Resale", font_header)[1]
         tb_h2 = _text_bbox(draw, cond_text, font_cond)[1] if font_cond else 0
-        gap_y = _scaled(4, scale)
+        gap_y = _scaled(5, scale)
         return tb_h1 + tb_h2 + gap_y + pad_y * 2
     return font_header.size + pad_y * 2
 
@@ -988,6 +988,11 @@ def draw_seller_badge(
         text_color = (20, 75, 30, 255)
         cond_color = (35, 115, 45, 255)
         border_color = (140, 195, 145, 255)
+        font_size = _scaled(int(_TITLE_FONT_MAX * 0.51), scale)
+        pad_x = _scaled(26, scale)
+        pad_y = _scaled(12, scale)
+        gap_y = _scaled(5, scale)
+        radius = _scaled(16, scale)
     else:
         header_text = "البائع: Amazon.eg"
         cond_text = None
@@ -995,15 +1000,14 @@ def draw_seller_badge(
         text_color = (0, 69, 124, 255)
         cond_color = None
         border_color = (180, 205, 235, 255)
+        font_size = _scaled(int(_TITLE_FONT_MAX * 0.44), scale)
+        pad_x = _scaled(22, scale)
+        pad_y = _scaled(10, scale)
+        gap_y = _scaled(4, scale)
+        radius = _scaled(14, scale)
 
-    font_size = _scaled(int(_TITLE_FONT_MAX * 0.44), scale)
     font_header = _load_title_font(font_size, title=header_text)
     font_cond = _load_title_font(int(font_size * 0.9), title=cond_text or "") if cond_text else None
-
-    pad_x = _scaled(22, scale)
-    pad_y = _scaled(10, scale)
-    gap_y = _scaled(4, scale)
-    radius = _scaled(14, scale)
 
     tb_w1, tb_h1 = _text_bbox(draw, header_text, font_header)
     tb_w2, tb_h2 = _text_bbox(draw, cond_text, font_cond) if (cond_text and font_cond) else (0, 0)
@@ -1032,7 +1036,7 @@ def draw_seller_badge(
         outline=border_color,
         width=max(1, _scaled(1.5, scale)),
     )
-    
+
     header_x = x1 + (box_w - tb_w1) // 2
     _draw_text(draw, (header_x, y1 + pad_y), header_text, font_header, text_color)
 
