@@ -512,6 +512,7 @@ async def process_composite_urls(
                 entry["product"]["price"],
                 entry["product"].get("list_price"),
             )
+            entry_stype = entry.get("seller_type") or entry.get("product", {}).get("seller_type") or "NEW_AMAZON"
             for publish_result in result.results:
                 if publish_result.success:
                     db.add_published_product(
@@ -520,6 +521,7 @@ async def process_composite_urls(
                         source_channel_id,
                         publish_result.message_id,
                         destination_id=publish_result.destination_id,
+                        seller_type=entry_stype,
                         image_path=entry.get("image_path"),
                         **price_fields,
                     )

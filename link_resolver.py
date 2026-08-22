@@ -377,18 +377,15 @@ async def resolve_product_input(user_input: str, domain: str = "www.amazon.eg") 
     seller_type, resolved_merchant_id = classify_seller_from_merchant_id(merchant_id)
     clean_url = build_clean_url(asin, domain, merchant_id=resolved_merchant_id)
 
-    logger.debug(
-        "RESOLVER RESULT:\n"
+    logger.info(
+        "SELLER LIFECYCLE:\n"
+        "  stage=RESOLVE_PRODUCT_INPUT\n"
         "  asin=%s\n"
         "  seller_type=%s\n"
-        "  merchant_id=%s\n"
-        "  clean_url=%s\n"
-        "  final_url=%s",
+        "  merchant_id=%s",
         asin,
         seller_type,
         resolved_merchant_id,
-        clean_url,
-        final_url,
     )
 
     return ResolvedProductInput(

@@ -246,6 +246,7 @@ async def prepare_composite_draft_from_inputs(
     asins = ",".join(entry["asin"].upper() for entry in entries)
     combined_title = " | ".join(entry["title"] for entry in entries)
 
+    comp_stype = entries[0].get("seller_type") or entries[0].get("product", {}).get("seller_type") or "NEW_AMAZON"
     draft_id = db.create_draft_post(
         asin=asins,
         title=combined_title,
@@ -256,6 +257,7 @@ async def prepare_composite_draft_from_inputs(
         created_by=admin_id,
         coupon=None,
         list_price=None,
+        seller_type=comp_stype,
     )
     draft = db.get_draft_post(draft_id)
     logger.info("COMPOSITE DRAFT CREATED draft_id=%s asins=%s", draft_id, asins)

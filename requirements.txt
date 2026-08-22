@@ -7,3 +7,4 @@ python-dotenv
 google-generativeai
 arabic-reshaper
 python-bidi
+matplotlib>=3.7.0

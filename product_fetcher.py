@@ -713,20 +713,16 @@ async def fetch_product(
                     "screenshot": None,
                 }
 
-            if seller_type == "AMAZON_RESALE":
-                logger.debug(
-                    "RESALE OFFER FOUND\n"
-                    "  merchant_id=%s\n"
-                    "  price=%s\n"
-                    "  condition=%s\n"
-                    "  availability=AVAILABLE",
-                    target_merchant_id,
-                    p_text,
-                    s_cond or "Used",
-                )
-                logger.debug("RESALE FETCH SUCCESS\n  source=CREATORS_API")
-            else:
-                logger.debug("NEW OFFER FOUND merchant_id=%s price=%s availability=AVAILABLE", target_merchant_id, p_text)
+            logger.info(
+                "SELLER LIFECYCLE:\n"
+                "  stage=PRODUCT_FETCH_COMPLETE\n"
+                "  asin=%s\n"
+                "  seller_type=%s\n"
+                "  merchant_id=%s",
+                asin.upper(),
+                seller_type,
+                target_merchant_id,
+            )
 
             product: dict = {
                 "asin": asin.upper(),

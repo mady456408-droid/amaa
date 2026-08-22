@@ -167,6 +167,19 @@ async def publish_and_record(
         pending.get("list_price"),
     )
 
+    stype = pending.get("seller_type") or "NEW_AMAZON"
+    merchant_id = "A2N2MP47XAP1MK" if stype == "AMAZON_RESALE" else "A1ZVRGNO5AYLOV"
+    logger.info(
+        "SELLER LIFECYCLE:\n"
+        "  stage=APPROVE_PENDING_DUPLICATE\n"
+        "  asin=%s\n"
+        "  seller_type=%s\n"
+        "  merchant_id=%s",
+        pending.get("asin"),
+        stype,
+        merchant_id,
+    )
+
     # Add to published_products for each successful destination
     for publish_result in result.results:
         if publish_result.success:
@@ -176,7 +189,7 @@ async def publish_and_record(
                 pending["source_channel_id"],
                 publish_result.message_id,
                 destination_id=publish_result.destination_id,
-                seller_type=pending.get("seller_type", "NEW_AMAZON"),
+                seller_type=stype,
                 image_path=pending.get("image_path"),
                 **price_fields,
             )

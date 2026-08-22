@@ -620,15 +620,27 @@ def extract_seller_offer(
     matching_offers = []
 
     for listing in listings:
-        merchant_info = listing.get("merchantInfo") or {}
+        merchant_info = (
+            listing.get("merchantInfo")
+            or listing.get("merchant")
+            or listing.get("seller")
+            or {}
+        )
         m_id = (
             merchant_info.get("id")
             or merchant_info.get("merchantId")
             or merchant_info.get("sellerId")
+            or merchant_info.get("merchant_id")
+            or merchant_info.get("seller_id")
             or listing.get("merchantId")
             or listing.get("sellerId")
+            or listing.get("merchant_id")
+            or listing.get("seller_id")
             or ""
         ).strip().upper()
+
+        if not m_id and target_merchant_id in str(listing).upper():
+            m_id = target_merchant_id
 
         m_name = merchant_info.get("name") or merchant_info.get("displayName") or ""
         cond = listing.get("condition") or {}

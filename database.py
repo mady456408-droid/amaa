@@ -845,6 +845,17 @@ class Database:
         clean_url: str | None = None,
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
+        merchant_id = "A2N2MP47XAP1MK" if seller_type == "AMAZON_RESALE" else "A1ZVRGNO5AYLOV"
+        logger.info(
+            "SELLER LIFECYCLE:\n"
+            "  stage=ADD_PUBLISHED_PRODUCT\n"
+            "  asin=%s\n"
+            "  seller_type=%s\n"
+            "  merchant_id=%s",
+            asin.upper(),
+            seller_type,
+            merchant_id,
+        )
         with self._connect() as conn:
             cur = conn.execute(
                 """
@@ -957,6 +968,18 @@ class Database:
             stype = seller_type or (dict(current).get("seller_type") if current else None)
             img = image_path or (dict(current).get("image_path") if current else None)
             curl = clean_url or (dict(current).get("clean_url") if current else None)
+
+            merchant_id = "A2N2MP47XAP1MK" if stype == "AMAZON_RESALE" else "A1ZVRGNO5AYLOV"
+            logger.info(
+                "SELLER LIFECYCLE:\n"
+                "  stage=UPDATE_PUBLISHED_AFTER_REPUBLISH\n"
+                "  asin=%s\n"
+                "  seller_type=%s\n"
+                "  merchant_id=%s",
+                dict(current).get("asin") if current else "",
+                stype,
+                merchant_id,
+            )
 
             if current:
                 conn.execute(
@@ -1434,6 +1457,17 @@ class Database:
         seller_type: str = "NEW_AMAZON",
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
+        merchant_id = "A2N2MP47XAP1MK" if seller_type == "AMAZON_RESALE" else "A1ZVRGNO5AYLOV"
+        logger.info(
+            "SELLER LIFECYCLE:\n"
+            "  stage=CREATE_PENDING_APPROVAL\n"
+            "  asin=%s\n"
+            "  seller_type=%s\n"
+            "  merchant_id=%s",
+            asin.upper(),
+            seller_type,
+            merchant_id,
+        )
         with self._connect() as conn:
             cur = conn.execute(
                 """
@@ -1512,6 +1546,17 @@ class Database:
             raise ValueError(f"Invalid seller_type: {seller_type!r}")
 
         now = datetime.now(timezone.utc).isoformat()
+        merchant_id = "A2N2MP47XAP1MK" if seller_type == "AMAZON_RESALE" else "A1ZVRGNO5AYLOV"
+        logger.info(
+            "SELLER LIFECYCLE:\n"
+            "  stage=CREATE_DRAFT_POST\n"
+            "  asin=%s\n"
+            "  seller_type=%s\n"
+            "  merchant_id=%s",
+            asin.upper(),
+            seller_type,
+            merchant_id,
+        )
         with self._connect() as conn:
             cur = conn.execute(
                 """
