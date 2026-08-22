@@ -70,6 +70,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -90,7 +92,7 @@ async def validate_and_fetch_url(
     Returns product data dict if successful, None if failed.
     """
     try:
-        logger.info("VALIDATING URL %s: %s", index, url)
+        logger.debug("VALIDATING URL %s: %s", index, url)
 
         resolved = await resolve_product_input(url, AMAZON_DOMAIN)
         if not resolved:
@@ -105,7 +107,7 @@ async def validate_and_fetch_url(
         scrape_asin = f"{asin}_{message_id}_{index}"
         coupon_enabled = db.get_coupon_detection_enabled()
 
-        logger.info(
+        logger.debug(
             "SOURCE POST RESOLUTION:\n"
             "  asin=%s\n"
             "  seller_type=%s\n"

@@ -603,7 +603,7 @@ async def fetch_product(
 
     if client and creators_api_configured():
         if seller_type == "AMAZON_RESALE":
-            logger.info(
+            logger.debug(
                 "RESALE FETCH START\n"
                 "  asin=%s\n"
                 "  seller_type=AMAZON_RESALE\n"
@@ -630,7 +630,7 @@ async def fetch_product(
                 )
                 cached_offer_found = (status == "AVAILABLE")
 
-                logger.info(
+                logger.debug(
                     "RESALE CACHE CHECK:\n"
                     "  asin=%s\n"
                     "  cache_hit=%s\n"
@@ -643,7 +643,7 @@ async def fetch_product(
                 )
 
                 if cache_hit and not cached_offer_found:
-                    logger.info(
+                    logger.debug(
                         "RESALE CACHE REFRESH:\n"
                         "  asin=%s\n"
                         "  reason=cached_merchant_missing",
@@ -661,7 +661,7 @@ async def fetch_product(
                         extract_seller_offer(item, "AMAZON_RESALE") if item else ("MISSING", None, None, None, None, None, None)
                     )
 
-                logger.info(
+                logger.debug(
                     "RESALE LIVE CHECK:\n"
                     "  asin=%s\n"
                     "  merchant_id=%s\n"
@@ -714,7 +714,7 @@ async def fetch_product(
                 }
 
             if seller_type == "AMAZON_RESALE":
-                logger.info(
+                logger.debug(
                     "RESALE OFFER FOUND\n"
                     "  merchant_id=%s\n"
                     "  price=%s\n"
@@ -724,9 +724,9 @@ async def fetch_product(
                     p_text,
                     s_cond or "Used",
                 )
-                logger.info("RESALE FETCH SUCCESS\n  source=CREATORS_API")
+                logger.debug("RESALE FETCH SUCCESS\n  source=CREATORS_API")
             else:
-                logger.info("NEW OFFER FOUND merchant_id=%s price=%s availability=AVAILABLE", target_merchant_id, p_text)
+                logger.debug("NEW OFFER FOUND merchant_id=%s price=%s availability=AVAILABLE", target_merchant_id, p_text)
 
             product: dict = {
                 "asin": asin.upper(),

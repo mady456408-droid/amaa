@@ -193,11 +193,11 @@ def _log_creators_response(resp: httpx.Response) -> dict[str, Any] | None:
 
     if parsed is not None:
         if resp.status_code >= 400:
-            logger.info("CREATORS RESPONSE JSON:\n%r", parsed)
+            logger.debug("CREATORS RESPONSE JSON:\n%r", parsed)
         else:
-            logger.info("CREATORS RESPONSE JSON: parsed_ok keys=%r", list(parsed.keys()))
+            logger.debug("CREATORS RESPONSE JSON: parsed_ok keys=%r", list(parsed.keys()))
     else:
-        logger.info("CREATORS RESPONSE JSON: unavailable")
+        logger.debug("CREATORS RESPONSE JSON: unavailable")
 
     if resp.status_code == 403:
         _log_creators_403_diagnosis(text, parsed)
@@ -877,16 +877,16 @@ class CreatorsClient:
             for asin in normalized_asins:
                 cached = db.get_creators_cache(asin, profile)
                 if cached:
-                    logger.info("CREATORS CACHE HIT asin=%s profile=%s", asin, profile)
+                    logger.debug("CREATORS CACHE HIT asin=%s profile=%s", asin, profile)
                     item = NormalizedItem.from_dict(cached)
                     if item.title != "Not found":
                         results[asin] = item
                         continue
-                logger.info("CREATORS CACHE MISS asin=%s profile=%s", asin, profile)
+                logger.debug("CREATORS CACHE MISS asin=%s profile=%s", asin, profile)
                 missing.append(asin)
         else:
             if bypass_cache:
-                logger.info("CREATORS CACHE BYPASS asins=%s profile=%s", normalized_asins, profile)
+                logger.debug("CREATORS CACHE BYPASS asins=%s profile=%s", normalized_asins, profile)
             missing = list(normalized_asins)
 
         source_label = "MONITOR" if profile == "price_drop" else "REALTIME"

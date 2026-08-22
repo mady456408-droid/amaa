@@ -257,16 +257,16 @@ def classify_seller_from_merchant_id(merchant_id: str | None) -> tuple[str, str 
     - Unknown 3rd party -> ("NEW_AMAZON", merchant_id) [logged as unsupported 3rd party]
     """
     if not merchant_id:
-        logger.info("SELLER CLASSIFICATION: no explicit merchant_id -> default NEW_AMAZON")
+        logger.debug("SELLER CLASSIFICATION: no explicit merchant_id -> default NEW_AMAZON")
         return ("NEW_AMAZON", None)
 
     norm_m_id = merchant_id.strip().upper()
     if norm_m_id == AMAZON_RESALE_SELLER_ID:
-        logger.info("SELLER CLASSIFICATION: merchant_id=%s -> AMAZON_RESALE", norm_m_id)
+        logger.debug("SELLER CLASSIFICATION: merchant_id=%s -> AMAZON_RESALE", norm_m_id)
         return ("AMAZON_RESALE", AMAZON_RESALE_SELLER_ID)
 
     if norm_m_id == NEW_AMAZON_SELLER_ID:
-        logger.info("SELLER CLASSIFICATION: merchant_id=%s -> NEW_AMAZON", norm_m_id)
+        logger.debug("SELLER CLASSIFICATION: merchant_id=%s -> NEW_AMAZON", norm_m_id)
         return ("NEW_AMAZON", NEW_AMAZON_SELLER_ID)
 
     logger.warning("SELLER CLASSIFICATION: unknown/unsupported merchant_id=%s -> default NEW_AMAZON", norm_m_id)
@@ -294,22 +294,22 @@ async def resolve_redirect(url: str) -> str:
         head_status = response.status_code
         if head_status < 400:
             final = str(response.url)
-            logger.info("RESOLVER SUCCESS final_url=%s", final)
+            logger.debug("RESOLVER SUCCESS final_url=%s", final)
             return final
-        logger.info("RESOLVER HEAD FAILED status=%s", head_status)
+        logger.debug("RESOLVER HEAD FAILED status=%s", head_status)
     except httpx.HTTPError as exc:
         resp = getattr(exc, "response", None)
         head_status = resp.status_code if resp is not None else None
         if head_status is not None:
-            logger.info("RESOLVER HEAD FAILED status=%s", head_status)
+            logger.debug("RESOLVER HEAD FAILED status=%s", head_status)
         else:
-            logger.info("RESOLVER HEAD FAILED error=%s", exc)
+            logger.debug("RESOLVER HEAD FAILED error=%s", exc)
 
     # Short-link providers (e.g. a.y-ay.com) often block HEAD — follow redirects via GET.
-    logger.info("RESOLVER FALLBACK TO GET")
+    logger.debug("RESOLVER FALLBACK TO GET")
     response = await _http_client.get(url)
     final = str(response.url)
-    logger.info("RESOLVER SUCCESS final_url=%s", final)
+    logger.debug("RESOLVER SUCCESS final_url=%s", final)
     return final
 
 
@@ -324,14 +324,14 @@ async def resolve_product_input(user_input: str, domain: str = "www.amazon.eg") 
     if not text:
         return None
 
-    logger.info("PRODUCT RESOLVER INPUT: %s", text)
+    logger.debug("PRODUCT RESOLVER INPUT: %s", text)
 
     # 1. Direct 10-char ASIN check
     if len(text) == 10 and re.match(r"^[A-Z0-9]{10}$", text, re.I):
         asin = text.upper()
         seller_type, merchant_id = classify_seller_from_merchant_id(None)
         clean_url = build_clean_url(asin, domain, merchant_id=merchant_id)
-        logger.info(
+        logger.debug(
             "RESOLVER RESULT (bare ASIN):\n"
             "  asin=%s\n"
             "  seller_type=%s\n"
@@ -377,7 +377,7 @@ async def resolve_product_input(user_input: str, domain: str = "www.amazon.eg") 
     seller_type, resolved_merchant_id = classify_seller_from_merchant_id(merchant_id)
     clean_url = build_clean_url(asin, domain, merchant_id=resolved_merchant_id)
 
-    logger.info(
+    logger.debug(
         "RESOLVER RESULT:\n"
         "  asin=%s\n"
         "  seller_type=%s\n"

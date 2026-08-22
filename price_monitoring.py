@@ -325,7 +325,7 @@ async def evaluate_product_price_check(
         counts["api_failures"] += 1
         counts["unknown_new"] += 1
         counts["unknown_resale"] += 1
-        logger.info("PRICE MONITOR → SKIP REASON: ASIN=%s reason=api_batch_failed", asin)
+        logger.debug("PRICE MONITOR → SKIP REASON: ASIN=%s reason=api_batch_failed", asin)
         return {
             "asin": asin,
             "api_failed": True,
@@ -355,7 +355,7 @@ async def evaluate_product_price_check(
         if prev_last_valid is None and latest_history:
             prev_last_valid = float(latest_history["final_price"])
 
-        logger.info(
+        logger.debug(
             "PRICE MONITOR → ASIN=%s SELLER=%s AVAILABILITY=%s PREV_AVAILABILITY=%s PREV_LAST_VALID=%s",
             asin,
             seller_type,
@@ -383,7 +383,7 @@ async def evaluate_product_price_check(
                 counts["unknown_new"] += 1
             else:
                 counts["unknown_resale"] += 1
-            logger.info(
+            logger.debug(
                 "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=unknown_api_response",
                 asin,
                 seller_type,
@@ -395,7 +395,7 @@ async def evaluate_product_price_check(
                 counts["missing_merchant_new"] += 1
             else:
                 counts["missing_merchant_resale"] += 1
-            logger.info(
+            logger.debug(
                 "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=missing_merchant_id prev_availability=%s",
                 asin,
                 seller_type,
@@ -423,7 +423,7 @@ async def evaluate_product_price_check(
                 counts["out_of_stock_new"] += 1
             else:
                 counts["out_of_stock_resale"] += 1
-            logger.info(
+            logger.debug(
                 "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=out_of_stock_offer_unavailable prev_availability=%s",
                 asin,
                 seller_type,
@@ -490,7 +490,7 @@ async def evaluate_product_price_check(
             seller_state_updates.append(("AVAILABLE", curr_final, ref_price, product["id"], seller_type))
             counts["baseline_created"] += 1
 
-            logger.info(
+            logger.debug(
                 "REFERENCE PRICE: asin=%s seller_type=%s reference_price=%.2f current_price=%.2f last_valid_price=None reference_discount_percent=%.2f",
                 asin,
                 seller_type,
@@ -526,7 +526,7 @@ async def evaluate_product_price_check(
                     prev_availability,
                 )
             else:
-                logger.info(
+                logger.debug(
                     "PRICE MONITOR → INITIAL BASELINE RECORD SAVED asin=%s seller_type=%s price=%.2f (no alert)",
                     asin,
                     seller_type,
@@ -539,7 +539,7 @@ async def evaluate_product_price_check(
         price_diff = curr_final - effective_prev
         has_price_change = abs(price_diff) >= 0.01
 
-        logger.info(
+        logger.debug(
             "REFERENCE PRICE: asin=%s seller_type=%s reference_price=%.2f current_price=%.2f last_valid_price=%.2f reference_discount_percent=%.2f",
             asin,
             seller_type,
@@ -644,7 +644,7 @@ async def evaluate_product_price_check(
                         product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={AMAZON_RESALE_SELLER_ID}",
                     )
 
-            logger.info(
+            logger.debug(
                 "SMART RESTOCK DECISION: asin=%s seller_type=%s current=%.2f reference=%.2f last_valid=%.2f qualifies=%s reason=%s",
                 asin,
                 seller_type,
@@ -668,7 +668,7 @@ async def evaluate_product_price_check(
             counts["unchanged"] += 1
             seller_eval["change_type"] = "unchanged"
             if seller_type == "AMAZON_RESALE":
-                logger.info(
+                logger.debug(
                     "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=SKIP_ALERT alert_reason=PRICE_UNCHANGED",
                     asin,
                     AMAZON_RESALE_SELLER_ID,
@@ -677,7 +677,7 @@ async def evaluate_product_price_check(
                     prev_availability,
                 )
             else:
-                logger.info(
+                logger.debug(
                     "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=price_unchanged price=%.2f",
                     asin,
                     seller_type,
@@ -694,7 +694,7 @@ async def evaluate_product_price_check(
         if change_type == "price_increase":
             counts["price_increases"] += 1
             if seller_type == "AMAZON_RESALE":
-                logger.info(
+                logger.debug(
                     "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=SKIP_ALERT alert_reason=PRICE_INCREASE",
                     asin,
                     AMAZON_RESALE_SELLER_ID,
@@ -703,7 +703,7 @@ async def evaluate_product_price_check(
                     prev_availability,
                 )
             else:
-                logger.info(
+                logger.debug(
                     "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=price_increase previous=%.2f current=%.2f",
                     asin,
                     seller_type,
@@ -732,7 +732,7 @@ async def evaluate_product_price_check(
         )
         seller_state_updates.append(("AVAILABLE", curr_final, ref_price, product["id"], seller_type))
 
-        logger.info(
+        logger.debug(
             "PRICE MONITOR → HISTORY RECORD SAVED asin=%s seller_type=%s previous=%.2f current=%.2f change=%.2f percent=%.1f%% type=%s",
             asin,
             seller_type,
@@ -749,7 +749,7 @@ async def evaluate_product_price_check(
             if savings < min_drop:
                 counts["ignored_small_changes"] += 1
                 if seller_type == "AMAZON_RESALE":
-                    logger.info(
+                    logger.debug(
                         "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=SKIP_ALERT alert_reason=BELOW_MIN_DROP",
                         asin,
                         AMAZON_RESALE_SELLER_ID,
@@ -758,7 +758,7 @@ async def evaluate_product_price_check(
                         prev_availability,
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         "PRICE MONITOR → SKIP REASON: ASIN=%s seller_type=%s reason=below_min_drop savings=%.2f min_drop=%s",
                         asin,
                         seller_type,
@@ -1353,7 +1353,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
     t_drop_calc = 0.0
 
     for asin, product in asin_to_product.items():
-        logger.info("PRICE MONITOR → ASIN=%s", asin)
+        logger.debug("PRICE MONITOR → ASIN=%s", asin)
 
         item = fetched_items.get(asin)
         eval_res = await evaluate_product_price_check(db, product, item, bulk_history, min_drop)
