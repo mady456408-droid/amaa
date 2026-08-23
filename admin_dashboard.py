@@ -46,6 +46,7 @@ from conversation_states import (
     AWAIT_GEMINI_SYSTEM_PROMPT,
     AWAIT_CHATGPT_REWRITE_PROMPT,
     AWAIT_SINGLE_PRODUCT_CHECK,
+    AWAIT_PUBLISH_CODE,
 )
 from telethon_auth import (
     AUTH_STATE_CODE,
@@ -69,9 +70,15 @@ from custom_image_post import (
     custom_image_state_handlers,
     custom_image_callback_handlers,
 )
+from publish_code import (
+    CB_PUBLISH_CODE,
+    start_publish_code,
+    receive_publish_code,
+)
 from database import Database
 
 logger = logging.getLogger(__name__)
+
 
 CB_MAIN = "adm:main"
 CB_ADD = "adm:add"
@@ -233,7 +240,9 @@ def _main_keyboard(paused: bool, telethon_connected: bool = True) -> InlineKeybo
             ],
             [
                 InlineKeyboardButton("🖼 Custom Image Post", callback_data=CB_CUSTOM_IMAGE_POST),
+                InlineKeyboardButton("📢 Publish Code", callback_data=CB_PUBLISH_CODE),
             ],
+
             [
                 InlineKeyboardButton(
                     "🔗 Affiliate Tag Settings",
@@ -1174,6 +1183,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             parse_mode="HTML",
         )
         return AWAIT_CUSTOM_IMAGE_POST
+
+    if data == CB_PUBLISH_CODE:
+        return await start_publish_code(update, context)
+
 
     if data == CB_INLINE_BUTTONS:
         await _safe_edit_message_text(
@@ -2890,6 +2903,13 @@ def build_admin_handlers() -> list:
                     receive_single_product_check,
                 ),
             ],
+            AWAIT_PUBLISH_CODE: [
+                MessageHandler(
+                    filters.TEXT & admin_filter,
+                    receive_publish_code,
+                ),
+            ],
+
             **manual_states,
             **custom_image_states,
         },

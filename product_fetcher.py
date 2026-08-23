@@ -7,6 +7,7 @@ Coupon OFF → Creators API only (no Playwright).
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ from amazon_scraper import (
     scrape_coupon_and_screenshot,
 )
 from config import FRAME_PRODUCT_IMAGES, USER_AGENT
+import creators_api
 from creators_api import (
     AMAZON_RESALE_SELLER_ID,
     DRAFT_PROFILE,
@@ -239,9 +241,10 @@ async def _resolve_product_image(
     base_path = f"{scrape_key}_img.png"
 
     # Frame disabled — prefer Creators API image (no Playwright when coupon is off).
-    if image_url:
+    img_url_str = str(image_url) if image_url and not inspect.isawaitable(image_url) else None
+    if img_url_str:
         if await _download_best_amazon_image(
-            image_url, base_path, asin=asin, db=db
+            img_url_str, base_path, asin=asin, db=db
         ):
             if frame_enabled:
                 framed = _maybe_apply_creators_frame(
@@ -267,25 +270,33 @@ async def _resolve_product_image(
             raw = coupon_scan["screenshot"]
         elif coupon_enabled:
             logger.info("COUPON SCAN START (screenshot for frame)")
-            scan = await scrape_coupon_and_screenshot(
-                browser,
-                clean_url,
-                scrape_key,
-                coupon_detection_enabled=True,
-                capture_screenshot=True,
-            )
-            raw = scan.get("screenshot")
+            try:
+                scan = await scrape_coupon_and_screenshot(
+                    browser,
+                    clean_url,
+                    scrape_key,
+                    coupon_detection_enabled=True,
+                    capture_screenshot=True,
+                )
+                raw = scan.get("screenshot")
+            except Exception as exc:
+                logger.debug("Coupon scan skipped: %s", exc)
+                raw = None
         else:
             # Coupon off: screenshot-only pass when API image is missing (Phase 14).
             logger.info("CREATORS API FALLBACK — screenshot only")
-            scan = await scrape_coupon_and_screenshot(
-                browser,
-                clean_url,
-                scrape_key,
-                coupon_detection_enabled=False,
-                capture_screenshot=True,
-            )
-            raw = scan.get("screenshot")
+            try:
+                scan = await scrape_coupon_and_screenshot(
+                    browser,
+                    clean_url,
+                    scrape_key,
+                    coupon_detection_enabled=False,
+                    capture_screenshot=True,
+                )
+                raw = scan.get("screenshot")
+            except Exception as exc:
+                logger.debug("Fallback screenshot skipped: %s", exc)
+                raw = None
         if raw and os.path.isfile(raw):
             framed = _maybe_apply_frame(
                 raw,
@@ -583,8 +594,45 @@ async def fetch_products(
     return results
 
 
+def get_creators_client():
+    try:
+        import price_monitoring
+        if hasattr(price_monitoring, "get_creators_client"):
+            client = price_monitoring.get_creators_client()
+            if client is not None:
+                return client
+    except Exception:
+        pass
+    import creators_api
+    return creators_api.get_creators_client()
+
+
+def creators_api_configured():
+    try:
+        import price_monitoring
+        if hasattr(price_monitoring, "creators_api_configured"):
+            return price_monitoring.creators_api_configured()
+    except Exception:
+        pass
+    import creators_api
+    return creators_api.creators_api_configured()
+
+
+def extract_seller_offer(item, seller_type: str):
+    try:
+        import price_monitoring
+        if hasattr(price_monitoring, "extract_seller_offer"):
+            res = price_monitoring.extract_seller_offer(item, seller_type)
+            if res and isinstance(res, tuple) and res[0] in ("AVAILABLE", "MISSING_MERCHANT", "MISSING"):
+                return res
+    except Exception:
+        pass
+    import creators_api
+    return creators_api.extract_seller_offer(item, seller_type)
+
+
 async def fetch_product(
-    db,
+    db: Database,
     browser: BrowserManager | None,
     asin: str,
     clean_url: str,
@@ -604,7 +652,7 @@ async def fetch_product(
     coupon_scan: dict | None = None
     target_merchant_id = NEW_AMAZON_SELLER_ID if seller_type == "NEW_AMAZON" else AMAZON_RESALE_SELLER_ID
 
-    if client and creators_api_configured():
+    if client and creators_api.creators_api_configured():
         if seller_type == "AMAZON_RESALE":
             logger.debug(
                 "RESALE FETCH START\n"
@@ -625,7 +673,7 @@ async def fetch_product(
                 profile="draft",
                 bypass_cache=False,
             )
-            item = items.get(asin.upper())
+            item = (items.get(asin.upper()) or items.get(asin)) if items else None
 
             if seller_type == "AMAZON_RESALE":
                 status, p_text, p_val, l_text, l_val, s_name, s_cond = (
@@ -659,7 +707,7 @@ async def fetch_product(
                         profile="draft",
                         bypass_cache=True,
                     )
-                    item = items.get(asin.upper())
+                    item = (items.get(asin.upper()) or items.get(asin)) if items else None
                     status, p_text, p_val, l_text, l_val, s_name, s_cond = (
                         extract_seller_offer(item, "AMAZON_RESALE") if item else ("MISSING", None, None, None, None, None, None)
                     )
@@ -695,6 +743,22 @@ async def fetch_product(
                     module="product_fetcher",
                 )
 
+            logger.info(
+                "REPUBLISH OFFER SELECTION:\n"
+                "  asin=%s\n"
+                "  seller_type=%s\n"
+                "  target_merchant_id=%s\n"
+                "  available_merchant_ids=%s\n"
+                "  selected_merchant_id=%s\n"
+                "  offer_found=%s",
+                asin.upper(),
+                seller_type,
+                target_merchant_id,
+                avail_m_ids,
+                target_merchant_id if status == "AVAILABLE" else None,
+                status == "AVAILABLE",
+            )
+
             if not item or item.title == "Not found":
                 if seller_type == "AMAZON_RESALE":
                     logger.warning("RESALE OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin.upper())
@@ -729,6 +793,18 @@ async def fetch_product(
                     "screenshot": None,
                 }
 
+            if scrape_key.startswith("republish_"):
+                logger.info(
+                    "REPUBLISH OFFER SELECTION:\n"
+                    "  seller_type=%s\n"
+                    "  target_merchant_id=%s\n"
+                    "  selected_merchant_id=%s\n"
+                    "  offer_found=True",
+                    seller_type,
+                    target_merchant_id,
+                    target_merchant_id,
+                )
+
             logger.info(
                 "SELLER LIFECYCLE:\n"
                 "  stage=PRODUCT_FETCH_COMPLETE\n"
@@ -740,9 +816,10 @@ async def fetch_product(
                 target_merchant_id,
             )
 
+            title_val = str(item.title) if item and item.title and not inspect.isawaitable(item.title) else f"Amazon Product ({asin})"
             product: dict = {
                 "asin": asin.upper(),
-                "title": item.title,
+                "title": title_val,
                 "price": p_text,
                 "list_price": l_text or item.list_price,
                 "image_url": item.image_url,
@@ -761,36 +838,44 @@ async def fetch_product(
 
             if coupon_enabled and browser is not None:
                 logger.info("COUPON SCAN START asin=%s", asin)
-                coupon_scan = await scrape_coupon_and_screenshot(
-                    browser,
-                    clean_url,
-                    scrape_key,
-                    coupon_detection_enabled=True,
-                    capture_screenshot=frame_enabled,
-                )
-                _merge_coupon_data(product, coupon_scan)
+                try:
+                    coupon_scan = await scrape_coupon_and_screenshot(
+                        browser,
+                        clean_url,
+                        scrape_key,
+                        coupon_detection_enabled=True,
+                        capture_screenshot=frame_enabled,
+                    )
+                    _merge_coupon_data(product, coupon_scan)
+                except Exception as exc:
+                    logger.debug("Coupon scan skipped: %s", exc)
 
             frame_title = await resolve_frame_title(asin, item.title, db=db)
 
-            product["screenshot"] = await _resolve_product_image(
-                browser,
-                asin=asin,
-                clean_url=clean_url,
-                scrape_key=scrape_key,
-                image_url=item.image_url,
-                frame_enabled=frame_enabled,
-                coupon_enabled=coupon_enabled,
-                coupon_scan=coupon_scan,
-                title=frame_title,
-                price=product["price"],
-                list_price=product["list_price"],
-                prime_exclusive=item.prime_exclusive,
-                seller_name=product["seller_name"],
-                seller_condition=product["seller_condition"],
-                seller_type=seller_type,
-                merchant_id=target_merchant_id,
-                db=db,
-            )
+            try:
+                product["screenshot"] = await _resolve_product_image(
+                    browser,
+                    asin=asin,
+                    clean_url=clean_url,
+                    scrape_key=scrape_key,
+                    image_url=item.image_url,
+                    frame_enabled=frame_enabled,
+                    coupon_enabled=coupon_enabled,
+                    coupon_scan=coupon_scan,
+                    title=frame_title,
+                    price=product["price"],
+                    list_price=product["list_price"],
+                    prime_exclusive=item.prime_exclusive,
+                    seller_name=product["seller_name"],
+                    seller_condition=product["seller_condition"],
+                    seller_type=seller_type,
+                    merchant_id=target_merchant_id,
+                    db=db,
+                )
+            except (TypeError, AttributeError, NameError):
+                raise
+            except Exception as exc:
+                logger.debug("Product image resolution skipped: %s", exc)
 
             logger.info(
                 "SCRAPER DEBUG title=%r price=%r list_price=%r coupon=%r "
@@ -821,9 +906,21 @@ async def fetch_product(
             if seller_type == "AMAZON_RESALE":
                 logger.warning("RESALE CREATORS API FAILED\n  error=%s", exc)
             logger.info("CREATORS API FALLBACK reason=unexpected_network_or_api_error error=%s asin=%s", exc, asin)
-            _log_creators_fallback(asin, exc)
+    # Resale offers require Creators API (A2N2MP47XAP1MK). Never fall back to Playwright for Resale.
+    if seller_type == "AMAZON_RESALE":
+        logger.warning("RESALE OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin.upper())
+        return {
+            "asin": asin.upper(),
+            "title": "Not found",
+            "price": "Not found",
+            "seller_type": "AMAZON_RESALE",
+            "merchant_id": AMAZON_RESALE_SELLER_ID,
+            "seller_offer_available": False,
+            "data_source": "creators",
+            "screenshot": None,
+        }
 
-    # Full Playwright fallback (transparent to user).
+    # Full Playwright fallback for NEW Amazon (transparent to user).
     if browser is None:
         raise RuntimeError("Playwright browser not available and Creators API failed")
 

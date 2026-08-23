@@ -798,7 +798,6 @@ async def handle_publish_draft(
             caption,
             reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
             products=products,
-            parse_mode="HTML",
         )
         result.log_summary()
 

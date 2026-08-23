@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import time
+import inspect
 import re
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
@@ -39,7 +40,12 @@ from database import Database, compute_reference_price
 from file_cleanup import cleanup_files
 from image_processor import apply_frame_creators_product
 from inline_buttons import build_inline_keyboard
-from link_resolver import build_clean_url, resolve_asin_from_input, resolve_product_input
+from link_resolver import (
+    build_clean_url,
+    extract_merchant_id,
+    resolve_asin_from_input,
+    resolve_product_input,
+)
 from product_fetcher import (
     _download_best_amazon_image,
     _require_screenshot,
@@ -272,7 +278,7 @@ async def price_monitoring_scheduler_loop(application: Any) -> None:
                         should_run = True
 
                 if should_run:
-                    logger.info(
+                    logger.debug(
                         "PRICE MONITOR → AUTOMATIC CHECK START interval_min=%s last_check=%s",
                         interval_min,
                         last_check_str,
@@ -939,7 +945,7 @@ async def run_single_product_price_check(db: Database, input_text: str) -> dict[
     row = db.get_published_product_by_asin(asin)
     existing_product = row is not None
 
-    logger.info(
+    logger.debug(
         "PRICE MONITOR → SINGLE CHECK START input=%s asin=%s existing_product=%s",
         input_text,
         asin,
@@ -961,12 +967,12 @@ async def run_single_product_price_check(db: Database, input_text: str) -> dict[
         "offersV2.listings.condition",
     ]
 
-    logger.info("PRICE MONITOR → SINGLE CHECK FETCH START asin=%s", asin)
+    logger.debug("PRICE MONITOR → SINGLE CHECK FETCH START asin=%s", asin)
     fetched_items = await client.get_items([asin], expanded_profile, db=db, profile="price_drop")
     item = fetched_items.get(asin)
 
     if not existing_product:
-        logger.info("PRICE MONITOR → SINGLE CHECK NEW PRODUCT asin=%s", asin)
+        logger.debug("PRICE MONITOR → SINGLE CHECK NEW PRODUCT asin=%s", asin)
         title = item.title if (item and item.title and item.title != "Not found") else f"Amazon Product ({asin})"
         new_price_val = None
         new_price_txt = None
@@ -991,7 +997,7 @@ async def run_single_product_price_check(db: Database, input_text: str) -> dict[
         )
         product = db.get_published_product_by_asin(asin)
     else:
-        logger.info("PRICE MONITOR → SINGLE CHECK DATABASE HIT asin=%s", asin)
+        logger.debug("PRICE MONITOR → SINGLE CHECK DATABASE HIT asin=%s", asin)
         product = row
 
     if not product:
@@ -1018,7 +1024,7 @@ async def run_single_product_price_check(db: Database, input_text: str) -> dict[
         seval = seller_evals.get(stype, {})
         status = seval.get("status", "UNKNOWN")
         curr_price = seval.get("curr_final")
-        logger.info(
+        logger.debug(
             "PRICE MONITOR → SINGLE CHECK %s merchant_id=%s price=%s availability=%s",
             stype,
             sid,
@@ -1026,9 +1032,9 @@ async def run_single_product_price_check(db: Database, input_text: str) -> dict[
             status,
         )
         if seval.get("is_baseline"):
-            logger.info("PRICE MONITOR → SINGLE CHECK BASELINE CREATED seller_type=%s", stype)
+            logger.debug("PRICE MONITOR → SINGLE CHECK BASELINE CREATED seller_type=%s", stype)
 
-    logger.info("PRICE MONITOR → SINGLE CHECK COMPLETE asin=%s added_to_monitoring=True", asin)
+    logger.debug("PRICE MONITOR → SINGLE CHECK COMPLETE asin=%s added_to_monitoring=True", asin)
 
     new_eval = seller_evals.get("NEW_AMAZON", {})
     resale_eval = seller_evals.get("AMAZON_RESALE", {})
@@ -1065,7 +1071,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
 
     t_total_start = time.monotonic()
 
-    logger.info("PRICE MONITOR → EVENT LOOP TEST START")
+    logger.debug("PRICE MONITOR → EVENT LOOP TEST START")
 
     # Stage 1: Fetch active tracked products
     t_stage1_start = time.monotonic()
@@ -1075,17 +1081,11 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
 
     total = len(products)
     logger.info("PRICE MONITOR → CYCLE START total_products=%s min_drop=%s", total, min_drop)
-    logger.info("PRICE MONITOR → AUTOMATIC CHECK START total_products=%s min_drop=%s", total, min_drop)
+    logger.debug("PRICE MONITOR → AUTOMATIC CHECK START total_products=%s min_drop=%s", total, min_drop)
 
     if not products:
         db.set_last_price_check_time()
         logger.info("PRICE MONITOR → CYCLE END total_products=0 last_check updated")
-        await _safe_send_message(
-            bot,
-            admin_chat_id,
-            "📉 <b>Price Check</b>\n\nNo published products to check.",
-            parse_mode="HTML",
-        )
         return
 
     client = get_creators_client()
@@ -1097,13 +1097,6 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
             parse_mode="HTML",
         )
         return
-
-    await _safe_send_message(
-        bot,
-        admin_chat_id,
-        f"📉 Checking prices & updating history for <b>{total}</b> unique products…",
-        parse_mode="HTML",
-    )
 
     # Stage 2: Validate ASINs and Build ASIN batches
     t_stage2_start = time.monotonic()
@@ -1117,7 +1110,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
             asin_to_product[clean_asin] = p
         else:
             invalid_asins.append((raw_asin, p))
-            logger.info("PRICE MONITOR → INVALID ASIN SKIPPED asin=%s reason=invalid_asin_format", raw_asin)
+            logger.debug("PRICE MONITOR → INVALID ASIN SKIPPED asin=%s reason=invalid_asin_format", raw_asin)
 
     valid_asins = list(asin_to_product.keys())
     t_stage2_end = time.monotonic()
@@ -1156,7 +1149,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         async with adaptive_sem:
             curr_active = adaptive_sem.active_tasks
 
-            logger.info(
+            logger.debug(
                 "PRICE MONITOR → BATCH START batch=%s/%s size=%s active_tasks=%s concurrency_limit=%s",
                 batch_index + 1,
                 total_batches,
@@ -1189,7 +1182,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                         await client.record_monitoring_success()
 
                     if attempt > 1:
-                        logger.info(
+                        logger.debug(
                             "PRICE MONITOR → BATCH SUCCESS AFTER RETRY batch=%s/%s attempt=%s duration=%.3fs",
                             batch_index + 1,
                             total_batches,
@@ -1197,7 +1190,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                             elapsed,
                         )
                     else:
-                        logger.info(
+                        logger.debug(
                             "PRICE MONITOR → API BATCH END batch=%s/%s elapsed=%.3fs",
                             batch_index + 1,
                             total_batches,
@@ -1249,7 +1242,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                             async with metrics_lock:
                                 retry_count += 1
 
-                            logger.info(
+                            logger.debug(
                                 "PRICE MONITOR → API 429 batch=%s/%s attempt=%s/%s retry_in=%.2fs concurrency=%s",
                                 batch_index + 1,
                                 total_batches,
@@ -1269,7 +1262,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                                 permanently_failed += 1
                                 unique_asins_failed += len(batch_asins)
 
-                            logger.warning(
+                            logger.error(
                                 "PRICE MONITOR → BATCH FAILED batch=%s/%s error_type=HTTP_429 attempts=%s permanently_failed=True",
                                 batch_index + 1,
                                 total_batches,
@@ -1280,18 +1273,16 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                         tb1 = time.monotonic()
                         elapsed = tb1 - tb0
                         batch_durations.append(elapsed)
-                        err_label = f"HTTP_{exc.status_code}" if exc.status_code else type(exc).__name__
                         async with metrics_lock:
                             failed_batches += 1
                             permanently_failed += 1
                             unique_asins_failed += len(batch_asins)
 
-                        logger.warning(
-                            "PRICE MONITOR → BATCH FAILED batch=%s/%s error_type=%s attempts=%s",
+                        logger.error(
+                            "PRICE MONITOR → BATCH FAILED batch=%s/%s exc=%s permanently_failed=True",
                             batch_index + 1,
                             total_batches,
-                            err_label,
-                            attempt,
+                            exc,
                         )
                         return {}
                 except Exception as exc:
@@ -1303,14 +1294,15 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                         permanently_failed += 1
                         unique_asins_failed += len(batch_asins)
 
-                    logger.warning(
-                        "PRICE MONITOR → BATCH FAILED batch=%s/%s error_type=%s attempts=%s",
+                    logger.error(
+                        "PRICE MONITOR → BATCH UNEXPECTED ERROR batch=%s/%s exc=%s permanently_failed=True",
                         batch_index + 1,
                         total_batches,
-                        type(exc).__name__,
-                        attempt,
+                        exc,
                     )
                     return {}
+
+            return {}
 
     batch_tasks = [fetch_batch(idx, b) for idx, b in enumerate(batches)]
     batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
@@ -1329,7 +1321,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         else 0.0
     )
 
-    logger.info(
+    logger.debug(
         "PRICE MONITOR → CYCLE METRICS:\n"
         "total_batches=%s\n"
         "successful_batches=%s\n"
@@ -1453,32 +1445,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         )
 
     t_stage10_start = time.monotonic()
-    summary_msg = (
-        "📉 <b>Price Check Complete</b>\n\n"
-        f"Checked <b>{total}</b> unique products (<b>{total_seller_checks}</b> seller condition checks):\n"
-        f"• Initial Baselines Created: <b>{baseline_created_count}</b>\n"
-        f"• Unchanged Prices: <b>{unchanged_count}</b>\n"
-        f"• Price Drops Detected: <b>{price_drops_count}</b> ({ignored_small_changes} below min drop)\n"
-        f"• Price Increases: <b>{price_increases_count}</b>\n"
-        f"• Restocks: <b>{restocks_count}</b>\n"
-        f"• Out of Stock (NEW Amazon): <b>{out_of_stock_new}</b>\n"
-        f"• Out of Stock (Amazon Resale): <b>{out_of_stock_resale}</b>\n"
-        f"• Missing Merchant (NEW Amazon): <b>{missing_merchant_new}</b>\n"
-        f"• Missing Merchant (Amazon Resale): <b>{missing_merchant_resale}</b>\n"
-    )
-    if invalid_asins_new > 0:
-        summary_msg += f"• Invalid ASINs Skipped: <b>{len(invalid_asins)}</b> ({invalid_asins_new + invalid_asins_resale} seller checks)\n"
-    if unknown_new > 0 or unknown_resale > 0 or api_failures > 0:
-        summary_msg += f"• API Failures / Unknown: <b>{unknown_new + unknown_resale}</b> (ASINs failed: {api_failures})\n"
-
-    if not notifications:
-        await _safe_send_message(
-            bot,
-            admin_chat_id,
-            summary_msg + "\nNo alerts queued.",
-            parse_mode="HTML",
-        )
-    else:
+    if notifications:
         for notif in notifications:
             reply_markup = InlineKeyboardMarkup(
                 [
@@ -1505,13 +1472,6 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
             if sent:
                 logger.info("PRICE MONITOR → NOTIFICATION SENT asin=%s", notif["asin"])
 
-        await _safe_send_message(
-            bot,
-            admin_chat_id,
-            summary_msg + f"\n🔔 <b>{len(notifications)} alert(s) sent.</b>",
-            parse_mode="HTML",
-        )
-
     t_stage10_end = time.monotonic()
     t_telegram_notifs = t_stage10_end - t_stage10_start
 
@@ -1522,7 +1482,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
     avg_api = (sum(batch_durations) / len(batch_durations)) if batch_durations else 0.0
     slowest_api = max(batch_durations) if batch_durations else 0.0
 
-    logger.info(
+    logger.debug(
         "PRICE MONITOR → PROFILING SUMMARY:\n"
         "• Stage 1 — Fetch active products: %.3fs\n"
         "• Stage 2 — Build ASIN batches: %.3fs\n"
@@ -1563,7 +1523,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
 
     db.set_last_price_check_time()
     logger.info("PRICE MONITOR → CYCLE END duration=%.3fs last_check updated", t_total)
-    logger.info("PRICE MONITOR → EVENT LOOP TEST END")
+    logger.debug("PRICE MONITOR → EVENT LOOP TEST END")
 
 
 async def republish_published_product(application: Any, published_id: int) -> str:
@@ -1585,9 +1545,31 @@ async def republish_published_product(application: Any, published_id: int) -> st
         AMAZON_DOMAIN,
         merchant_id=AMAZON_RESALE_SELLER_ID if stored_seller_type == "AMAZON_RESALE" else None,
     )
-    callback_seller_type = stored_seller_type
 
-    if stored_seller_type not in ("AMAZON_RESALE", "NEW_AMAZON"):
+    extracted_m_id = extract_merchant_id(stored_clean_url)
+    if stored_seller_type == "AMAZON_RESALE" and extracted_m_id and extracted_m_id != AMAZON_RESALE_SELLER_ID:
+        logger.error(
+            "SELLER IDENTITY MISMATCH:\n"
+            "  published_id=%s\n"
+            "  asin=%s\n"
+            "  seller_type=%s\n"
+            "  resolved_merchant_id=%s\n"
+            "  expected_merchant_id=A2N2MP47XAP1MK",
+            published_id,
+            asin,
+            stored_seller_type,
+            extracted_m_id,
+        )
+        return f"❌ Seller identity mismatch for published product {published_id}"
+
+    if stored_seller_type == "AMAZON_RESALE" and "m=A2N2MP47XAP1MK" not in stored_clean_url:
+        stored_clean_url = build_clean_url(
+            asin,
+            AMAZON_DOMAIN,
+            merchant_id=AMAZON_RESALE_SELLER_ID,
+        )
+
+    if not stored_seller_type or stored_seller_type not in ("AMAZON_RESALE", "NEW_AMAZON"):
         logger.error(
             "REPUBLISH INVALID SELLER TYPE:\n"
             "  published_id=%s\n"
@@ -1599,109 +1581,166 @@ async def republish_published_product(application: Any, published_id: int) -> st
         )
         return f"❌ Invalid or missing seller_type ('{stored_seller_type}') for published product {published_id}"
 
-    resolved_seller_type = stored_seller_type
-    resolved_merchant_id = (
-        AMAZON_RESALE_SELLER_ID if resolved_seller_type == "AMAZON_RESALE" else NEW_AMAZON_SELLER_ID
+    stored_merchant_id = row.get("merchant_id")
+    if stored_seller_type == "AMAZON_RESALE" and stored_merchant_id and stored_merchant_id != "A2N2MP47XAP1MK":
+        logger.error(
+            "SELLER IDENTITY MISMATCH:\n"
+            "  published_id=%s\n"
+            "  asin=%s\n"
+            "  seller_type=%s\n"
+            "  resolved_merchant_id=%s\n"
+            "  expected_merchant_id=A2N2MP47XAP1MK",
+            published_id,
+            asin,
+            stored_seller_type,
+            stored_merchant_id,
+        )
+        return f"❌ Seller identity mismatch for published product {published_id}"
+
+    stored_merchant_id = stored_merchant_id or (
+        AMAZON_RESALE_SELLER_ID if stored_seller_type == "AMAZON_RESALE" else NEW_AMAZON_SELLER_ID
     )
 
+    if stored_seller_type == "AMAZON_RESALE" or "m=A2N2MP47XAP1MK" in (stored_clean_url or ""):
+        requested_seller_type = "AMAZON_RESALE"
+        requested_merchant_id = AMAZON_RESALE_SELLER_ID
+    else:
+        requested_seller_type = "NEW_AMAZON"
+        requested_merchant_id = NEW_AMAZON_SELLER_ID
+
     logger.info(
-        "REPUBLISH SELLER RESOLUTION:\n"
+        "REPUBLISH INPUT CONTRACT:\n"
         "  published_id=%s\n"
         "  asin=%s\n"
         "  stored_seller_type=%s\n"
-        "  callback_seller_type=%s\n"
-        "  resolved_seller_type=%s\n"
-        "  resolved_merchant_id=%s\n"
-        "  stored_clean_url=%s",
+        "  stored_merchant_id=%s\n"
+        "  stored_clean_url=%s\n"
+        "  requested_seller_type=%s\n"
+        "  requested_merchant_id=%s",
         published_id,
         asin,
         stored_seller_type,
-        callback_seller_type,
-        resolved_seller_type,
-        resolved_merchant_id,
+        stored_merchant_id,
         stored_clean_url,
+        requested_seller_type,
+        requested_merchant_id,
     )
 
-    seller_type = resolved_seller_type
-    merchant_id = resolved_merchant_id
-    clean_url = stored_clean_url
+    resolved = await resolve_product_input(stored_clean_url, AMAZON_DOMAIN)
+
+    if stored_seller_type == "AMAZON_RESALE":
+        seller_type = "AMAZON_RESALE"
+        merchant_id = AMAZON_RESALE_SELLER_ID
+        clean_url = build_clean_url(asin, AMAZON_DOMAIN, merchant_id=AMAZON_RESALE_SELLER_ID)
+    else:
+        seller_type = resolved.seller_type if resolved else requested_seller_type
+        merchant_id = (resolved.merchant_id if resolved else requested_merchant_id) or NEW_AMAZON_SELLER_ID
+        clean_url = (resolved.clean_url if resolved else stored_clean_url) or build_clean_url(asin, AMAZON_DOMAIN)
+
+    logger.info(
+        "REPUBLISH SELLER RESOLUTION:\n"
+        "  stored_seller_type=%s\n"
+        "  resolved_seller_type=%s\n"
+        "  resolved_merchant_id=%s",
+        stored_seller_type,
+        seller_type,
+        merchant_id,
+    )
+
+    expected_merchant_id = (
+        AMAZON_RESALE_SELLER_ID if seller_type == "AMAZON_RESALE" else NEW_AMAZON_SELLER_ID
+    )
+
+    logger.info(
+        "REPUBLISH SELLER IDENTITY:\n"
+        "  published_id=%s\n"
+        "  asin=%s\n"
+        "  stored_seller_type=%s\n"
+        "  resolved_seller_type=%s\n"
+        "  resolved_merchant_id=%s\n"
+        "  expected_merchant_id=%s",
+        published_id,
+        asin,
+        stored_seller_type,
+        seller_type,
+        merchant_id,
+        expected_merchant_id,
+    )
+
+    logger.info(
+        "REPUBLISH SELLER CONTRACT:\n"
+        "  published_id=%s\n"
+        "  asin=%s\n"
+        "  stored_seller_type=%s\n"
+        "  stored_merchant_id=%s\n"
+        "  callback_seller_type=%s\n"
+        "  callback_merchant_id=%s\n"
+        "  resolved_seller_type=%s\n"
+        "  resolved_merchant_id=%s\n"
+        "  expected_merchant_id=%s\n"
+        "  clean_url=%s",
+        published_id,
+        asin,
+        stored_seller_type,
+        merchant_id,
+        stored_seller_type,
+        merchant_id,
+        seller_type,
+        merchant_id,
+        expected_merchant_id,
+        clean_url,
+    )
+
+    if seller_type == "AMAZON_RESALE":
+        logger.info("RESALE REPUBLISH START published_id=%s asin=%s merchant_id=%s", published_id, asin, merchant_id)
+
     scrape_key = f"republish_{published_id}_{asin}"
     coupon_enabled = db.get_coupon_detection_enabled()
     temp_files: list[str] = []
 
     try:
+        # REUSE UNIFIED PRODUCT FETCH PIPELINE FOR BOTH RESALE AND NEW (SAME AS MANUAL POST!)
+        product = await fetch_product(
+            db,
+            browser,
+            asin,
+            clean_url,
+            scrape_key,
+            coupon_enabled=coupon_enabled,
+            seller_type=seller_type,
+        )
+
+        stored_image = row.get("image_path")
+        if not product.get("screenshot") and stored_image:
+            product["screenshot"] = stored_image
+
+        if not product or product.get("seller_offer_available") is False or product.get("price") == "Not found":
+            logger.warning(
+                "%s OFFER MISSING asin=%s action=ABORT_REPUBLISH",
+                "RESALE" if seller_type == "AMAZON_RESALE" else "NEW",
+                asin.upper(),
+            )
+            return f"❌ {'Amazon Resale' if seller_type == 'AMAZON_RESALE' else 'NEW Amazon offer'} is currently unavailable"
+
+        display_url = resolve_display_url(product, clean_url)
+        short_url = await shorten_amazon_url(display_url, db)
+        if short_url:
+            display_url = short_url
+
+        if not isinstance(product.get("title"), str):
+            product["title"] = str(product.get("title")) if product.get("title") is not None and not inspect.isawaitable(product.get("title")) else f"Amazon Product ({asin})"
+        if not isinstance(product.get("price"), str):
+            product["price"] = str(product.get("price")) if product.get("price") is not None and not inspect.isawaitable(product.get("price")) else "Not found"
+        if product.get("list_price") is not None and not isinstance(product.get("list_price"), str):
+            product["list_price"] = str(product.get("list_price")) if not inspect.isawaitable(product.get("list_price")) else None
+        if not isinstance(product.get("seller_condition"), str):
+            product["seller_condition"] = str(product.get("seller_condition")) if product.get("seller_condition") is not None and not inspect.isawaitable(product.get("seller_condition")) else "Used"
+
+        seller_condition = product["seller_condition"]
+        price_text = product["price"]
+        list_price_text = product.get("list_price")
+
         if seller_type == "AMAZON_RESALE":
-            logger.info("RESALE REPUBLISH START published_id=%s asin=%s merchant_id=%s", published_id, asin, merchant_id)
-
-            # 1. Fetch ONLY the current Resale offer via Creators API (DO NOT check NEW Amazon or run Playwright)
-            client = get_creators_client()
-            status = "MISSING_MERCHANT"
-            p_text, p_val, l_text, l_val, s_name, s_cond = None, None, None, None, None, None
-            item = None
-
-            if client and creators_api_configured():
-                logger.info(
-                    "RESALE FETCH START\n"
-                    "  asin=%s\n"
-                    "  seller_type=AMAZON_RESALE\n"
-                    "  merchant_id=%s\n"
-                    "  source=CREATORS_API",
-                    asin.upper(),
-                    AMAZON_RESALE_SELLER_ID,
-                )
-                try:
-                    cache_hit = bool(db is not None and db.get_creators_cache(asin.upper(), "draft"))
-                    items = await client.get_items([asin], DRAFT_PROFILE, db=db, profile="draft", bypass_cache=False)
-                    item = items.get(asin.upper())
-                    status, p_text, p_val, l_text, l_val, s_name, s_cond = (
-                        extract_seller_offer(item, "AMAZON_RESALE") if item else ("MISSING", None, None, None, None, None, None)
-                    )
-                    cached_offer_found = (status == "AVAILABLE")
-
-                    logger.info(
-                        "RESALE CACHE CHECK:\n"
-                        "  asin=%s\n"
-                        "  cache_hit=%s\n"
-                        "  merchant_id=%s\n"
-                        "  cached_offer_found=%s",
-                        asin.upper(),
-                        cache_hit,
-                        AMAZON_RESALE_SELLER_ID,
-                        cached_offer_found,
-                    )
-
-                    if cache_hit and not cached_offer_found:
-                        logger.info(
-                            "RESALE CACHE REFRESH:\n"
-                            "  asin=%s\n"
-                            "  reason=cached_merchant_missing",
-                            asin.upper(),
-                        )
-                        items = await client.get_items([asin], DRAFT_PROFILE, db=db, profile="draft", bypass_cache=True)
-                        item = items.get(asin.upper())
-                        status, p_text, p_val, l_text, l_val, s_name, s_cond = (
-                            extract_seller_offer(item, "AMAZON_RESALE") if item else ("MISSING", None, None, None, None, None, None)
-                        )
-
-                    source_val = "CACHE" if (cache_hit and cached_offer_found) else "LIVE_API"
-                    raw_cnt = len(getattr(item, "raw_listings", []) or []) if item else 0
-                    log_resale_offer_evidence(
-                        asin=asin,
-                        source=source_val,
-                        offer_found=(status == "AVAILABLE"),
-                        price=p_text,
-                        availability=status,
-                        raw_listing_count=raw_cnt,
-                        module="republish",
-                    )
-                except Exception as exc:
-                    logger.warning("RESALE CREATORS API FAILED\n  error=%s", exc)
-
-            # 2. STRICT FAILURE CASE: If Resale offer is unavailable, ABORT IMMEDIATELY!
-            if status != "AVAILABLE" or not p_text or p_text == "Not found" or p_val is None:
-                logger.warning("RESALE OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin)
-                return "❌ Amazon Resale is currently unavailable"
-
             logger.info(
                 "RESALE OFFER FOUND\n"
                 "  merchant_id=%s\n"
@@ -1709,103 +1748,26 @@ async def republish_published_product(application: Any, published_id: int) -> st
                 "  condition=%s\n"
                 "  availability=AVAILABLE",
                 AMAZON_RESALE_SELLER_ID,
-                p_text,
-                s_cond or "Used",
+                price_text,
+                seller_condition,
             )
             logger.info("RESALE FETCH SUCCESS\n  source=CREATORS_API")
-
-            # 3. Product Content: REUSE stored title & stored image from published product record!
-            stored_title = row.get("title") or (item.title if item and item.title != "Not found" else f"Amazon Product ({asin})")
-            stored_image = row.get("image_path")
-
-            display_url = resolve_display_url({"merchant_id": AMAZON_RESALE_SELLER_ID, "seller_type": "AMAZON_RESALE"}, clean_url)
             logger.info("RESALE PUBLISH URL display_url=%s", display_url)
-            short_url = await shorten_amazon_url(display_url, db)
-            if short_url:
-                display_url = short_url
 
-            # 4. Resolve Image: REUSE stored image if available on disk; fall back to Creators API image download
-            image_path_to_use = None
-            if stored_image and os.path.exists(stored_image):
-                image_path_to_use = stored_image
-            else:
-                img_url = item.image_url if item else db.get_creators_image_url(asin)
-                if img_url:
-                    base_path = f"{scrape_key}_img.png"
-                    if await _download_best_amazon_image(img_url, base_path, asin=asin, db=db):
-                        image_path_to_use = base_path
-                        temp_files.append(base_path)
-
-            if not image_path_to_use or not os.path.exists(image_path_to_use):
-                raise RuntimeError(f"No stored product image available for ASIN {asin}")
-
-            if FRAME_PRODUCT_IMAGES:
-                framed_path = apply_frame_creators_product(
-                    image_path_to_use,
-                    f"{scrape_key}_framed.png",
-                    asin=asin,
-                    title=stored_title,
-                    price=p_text,
-                    list_price=l_text,
-                    seller_name="Amazon Resale",
-                    seller_condition=s_cond,
-                    seller_type="AMAZON_RESALE",
-                    merchant_id=AMAZON_RESALE_SELLER_ID,
-                )
-                final_image_path = _require_screenshot(framed_path, asin=asin)
-            else:
-                final_image_path = image_path_to_use
-
-            temp_files.append(final_image_path)
-
-            # 5. Build Resale Caption
-            caption = build_resale_caption(
-                title=stored_title,
-                price=p_text,
-                resale_url=display_url,
-                seller_condition=s_cond,
-            )
-
-            product = {
-                "asin": asin.upper(),
-                "title": stored_title,
-                "price": p_text,
-                "list_price": l_text,
-                "seller_name": "Amazon Resale",
-                "seller_condition": s_cond,
-                "seller_type": "AMAZON_RESALE",
-                "merchant_id": AMAZON_RESALE_SELLER_ID,
-                "screenshot": final_image_path,
-                "display_url": display_url,
-            }
-        else:
-            logger.info("NEW REPUBLISH START published_id=%s asin=%s merchant_id=%s", published_id, asin, merchant_id)
-            product = await fetch_product(
-                db,
-                browser,
-                asin,
-                clean_url,
-                scrape_key,
-                coupon_enabled=coupon_enabled,
-                seller_type=seller_type,
-            )
-
-            # STRICT SAFETY RULE: Do NOT fallback across seller types
-            if product.get("seller_offer_available") is False or product.get("price") == "Not found":
-                logger.warning("NEW OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin)
-                return "❌ NEW Amazon offer is currently unavailable"
-
-            display_url = resolve_display_url(product, clean_url)
-            short_url = await shorten_amazon_url(display_url, db)
-            if short_url:
-                display_url = short_url
-
+        if product.get("screenshot") and os.path.exists(product["screenshot"]):
             temp_files.append(product["screenshot"])
-            coupon = product.get("coupon") if coupon_enabled else None
-            coupon_kwargs = (
-                coupon_apply_kwargs_from_product(product) if coupon_enabled else {}
-            )
 
+        # Caption Construction
+        if seller_type == "AMAZON_RESALE":
+            caption = build_resale_caption(
+                title=product["title"],
+                price=price_text,
+                resale_url=display_url,
+                seller_condition=seller_condition,
+            )
+        else:
+            coupon = product.get("coupon") if coupon_enabled else None
+            coupon_kwargs = coupon_apply_kwargs_from_product(product) if coupon_enabled else {}
             if product["title"] == "Not found":
                 caption = build_caption(
                     product["title"],
@@ -1830,7 +1792,7 @@ async def republish_published_product(application: Any, published_id: int) -> st
         apply_ai_rewrite = not is_composite
         reason = "single validated product" if not is_composite else f"{len(asin_list)} validated products"
 
-        logger.info(
+        logger.debug(
             "REPUBLISH → AI REWRITE DECISION\n"
             "  published_id=%s\n"
             "  asin=%s\n"
@@ -1847,7 +1809,7 @@ async def republish_published_product(application: Any, published_id: int) -> st
         )
 
         if apply_ai_rewrite:
-            logger.info("REPUBLISH → CALLING AI REWRITE FUNCTION")
+            logger.debug("REPUBLISH → CALLING AI REWRITE FUNCTION")
             caption = rewrite_caption(
                 caption,
                 db,
@@ -1860,7 +1822,11 @@ async def republish_published_product(application: Any, published_id: int) -> st
         if upload_image != product["screenshot"]:
             temp_files.append(upload_image)
 
-        products = [{"title": product["title"], "url": display_url}]
+        prod_title = product.get("title")
+        if not isinstance(prod_title, str):
+            prod_title = str(prod_title) if prod_title is not None and not inspect.isawaitable(prod_title) else f"Amazon Product ({asin})"
+
+        products = [{"title": prod_title, "url": display_url}]
         fixed_buttons = db.list_fixed_buttons(enabled_only=True)
         inline_keyboard = build_inline_keyboard(
             products,
@@ -1890,9 +1856,14 @@ async def republish_published_product(application: Any, published_id: int) -> st
         if result.successful == 0:
             return "❌ Failed to publish to any destination"
 
+        p_val = product.get("price")
+        p_str = p_val if isinstance(p_val, str) else "Not found"
+        lp_val = product.get("list_price")
+        lp_str = lp_val if isinstance(lp_val, str) else None
+
         price_fields = extract_published_price_fields(
-            product["price"],
-            product.get("list_price"),
+            p_str,
+            lp_str,
         )
         numeric_price = price_fields["published_price_value"]
 
@@ -2190,7 +2161,7 @@ async def handle_price_chart_view(
     min_p = min(valid_prices) if valid_prices else None
     max_p = max(valid_prices) if valid_prices else None
 
-    logger.info(
+    logger.debug(
         "PRICE CHART DATA\n"
         "  history_count=%s\n"
         "  first_timestamp=%s\n"

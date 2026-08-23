@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 import logging
 import sqlite3
@@ -961,6 +962,7 @@ class Database:
         image_path: str | None = None,
         clean_url: str | None = None,
     ) -> None:
+        title = str(title) if title is not None and not inspect.isawaitable(title) else ""
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             current = conn.execute(
@@ -968,11 +970,26 @@ class Database:
                 (published_id,),
             ).fetchone()
 
-            stype = seller_type or (dict(current).get("seller_type") if current else None)
-            img = image_path or (dict(current).get("image_path") if current else None)
-            curl = clean_url or (dict(current).get("clean_url") if current else None)
+            stored_stype = dict(current).get("seller_type") if current else None
+            if stored_stype == "AMAZON_RESALE":
+                stype = "AMAZON_RESALE"
+            else:
+                stype = seller_type or stored_stype or "NEW_AMAZON"
 
-            merchant_id = "A2N2MP47XAP1MK" if stype == "AMAZON_RESALE" else "A1ZVRGNO5AYLOV"
+            img_raw = image_path or (dict(current).get("image_path") if current else None)
+            curl_raw = clean_url or (dict(current).get("clean_url") if current else None)
+            img = str(img_raw) if img_raw is not None and not inspect.isawaitable(img_raw) else None
+            curl = str(curl_raw) if curl_raw is not None and not inspect.isawaitable(curl_raw) else None
+
+            if stype == "AMAZON_RESALE":
+                merchant_id = "A2N2MP47XAP1MK"
+                asin_val = dict(current).get("asin", "") if current else ""
+                if curl and "m=A2N2MP47XAP1MK" not in curl:
+                    curl = f"https://www.amazon.eg/dp/{asin_val}?m=A2N2MP47XAP1MK"
+                elif not curl and asin_val:
+                    curl = f"https://www.amazon.eg/dp/{asin_val}?m=A2N2MP47XAP1MK"
+            else:
+                merchant_id = "A1ZVRGNO5AYLOV"
             logger.info(
                 "SELLER LIFECYCLE:\n"
                 "  stage=UPDATE_PUBLISHED_AFTER_REPUBLISH\n"
@@ -2115,4 +2132,11 @@ class Database:
         return True
 
     def get_enabled_destinations(self) -> list[dict[str, Any]]:
-        return self.list_destinations(enabled_only=True)
+        destinations = self.list_destinations(enabled_only=True)
+        if destinations:
+            return destinations
+        fallback_id = self.get_destination_channel_id()
+        if fallback_id:
+            return [{"id": 0, "title": "Default Destination", "chat_id": fallback_id, "enabled": 1}]
+        return []
+

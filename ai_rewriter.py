@@ -40,26 +40,26 @@ def enforce_seller_type_caption_rules(
 
         # Rule 1: Never describe an AMAZON_RESALE product as "جديد" or imply unused.
         caption = re.sub(r'\b(منتج جديد|بحالة جديدة|جديد تماماً|جديد تماما|جديد بالكامل)\b', 'منتج مستعمل', caption, flags=re.IGNORECASE)
-        caption = re.sub(r'📦\s*<b>الحالة:</b>\s*جديد', '📦 <b>الحالة:</b> مستعمل', caption, flags=re.IGNORECASE)
+        caption = re.sub(r'📦\s*(?:<b>)?الحالة:(?:</b>)?\s*جديد', '📦 الحالة: مستعمل', caption, flags=re.IGNORECASE)
 
         # Rule 2: Ensure USED / PRE-OWNED ("مستعمل") is explicitly stated in caption.
         if "مستعمل" not in caption:
             condition_phrase = format_resale_condition_arabic(seller_condition)
             if "Amazon Resale" in caption:
-                caption = caption.replace("Amazon Resale", f"Amazon Resale\n<b>{condition_phrase}</b>", 1)
+                caption = caption.replace("Amazon Resale", f"Amazon Resale\n{condition_phrase}", 1)
             else:
-                caption = f"♻️ <b>Amazon Resale</b>\n<b>{condition_phrase}</b>\n\n" + caption
+                caption = f"♻️ Amazon Resale\n{condition_phrase}\n\n" + caption
 
         # Rule 3: Ensure "Amazon Resale" header is present
         if "Amazon Resale" not in caption and "Resale" not in caption:
-            caption = "♻️ <b>Amazon Resale</b>\n" + caption
+            caption = "♻️ Amazon Resale\n" + caption
     else:
         # FOR NEW_AMAZON:
         # MUST NOT contain any "مستعمل" or "Resale" wording under any circumstances.
-        caption = re.sub(r'♻️\s*<b>Amazon Resale.*?</b>\n?', '', caption, flags=re.IGNORECASE)
-        caption = re.sub(r'<b>♻️.*?</b>\n?', '', caption, flags=re.IGNORECASE)
+        caption = re.sub(r'♻️\s*(?:<b>)?Amazon Resale.*?(?:</b>)?\n?', '', caption, flags=re.IGNORECASE)
+        caption = re.sub(r'(?:<b>)?♻️.*?(?:</b>)?\n?', '', caption, flags=re.IGNORECASE)
         caption = re.sub(r'♻️\s*المنتج.*?مستعمل\n?', '', caption, flags=re.IGNORECASE)
-        caption = re.sub(r'📦\s*<b>الحالة:</b>\s*Used.*?\n?', '', caption, flags=re.IGNORECASE)
+        caption = re.sub(r'📦\s*(?:<b>)?الحالة:(?:</b>)?\s*Used.*?\n?', '', caption, flags=re.IGNORECASE)
         caption = re.sub(r'\b(مستعمل|Amazon Resale)\b', '', caption, flags=re.IGNORECASE)
 
     return caption

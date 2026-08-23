@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 from telegram import Bot, Message
-from telegram.error import NetworkError, TimedOut
+from telegram.error import BadRequest, NetworkError, TimedOut
 
 from config import (
     PUBLISH_MAX_RETRIES,
@@ -13,6 +13,8 @@ from config import (
 )
 from coupon_price import format_standard_price_line
 from inline_buttons import short_product_name
+
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,13 @@ RETRYABLE_ERRORS = (
     httpx.ConnectTimeout,
     httpx.PoolTimeout,
 )
+
+
+def strip_html_tags(text: str) -> str:
+    """Strip HTML tags (e.g. <b>, </b>, <i>, </i>, <a>, </a>) from text."""
+    if not text:
+        return text
+    return re.sub(r'</?[a-zA-Z][^>]*>', '', text)
 
 
 def build_caption(
@@ -87,17 +96,17 @@ def build_resale_caption(
     resale_url: str,
     seller_condition: str | None = None,
 ) -> str:
-    """Build caption for Amazon Resale posts with explicit Arabic used/pre-owned condition."""
+    """Build plain-text caption for Amazon Resale posts with explicit Arabic used/pre-owned condition."""
     condition_phrase = format_resale_condition_arabic(seller_condition)
     lines = [
-        "♻️ <b>Amazon Resale</b>",
-        f"<b>{condition_phrase}</b>",
+        "♻️ Amazon Resale",
+        f"{condition_phrase}",
         "",
-        f"📦 <b>{title}</b>",
+        f"📦 {title}",
         "",
-        f"💰 <b>بسعر {price}</b>",
+        f"💰 بسعر {price}",
         "",
-        "🔗 <b>شوف العرض:</b>",
+        "🔗 شوف العرض:",
         resale_url,
     ]
     return "\n".join(lines)
@@ -150,23 +159,47 @@ async def publish_to_channel(
     photo_path: str,
     caption: str,
     reply_markup=None,
+    parse_mode: str | None = None,
+    publish_type: str = "PRODUCT",
+    source: str = "database",
 ) -> Message:
+    caption = strip_html_tags(caption)
     last_error: Exception | None = None
 
     for attempt in range(1, PUBLISH_MAX_RETRIES + 1):
         logger.info("PUBLISH ATTEMPT %s", attempt)
         try:
+            logger.info(
+                "PUBLISH DESTINATION:\n"
+                "  chat_id=%s\n"
+                "  source=%s\n"
+                "  publish_type=%s",
+                channel_id,
+                source,
+                publish_type,
+            )
             with open(photo_path, "rb") as photo:
                 msg = await bot.send_photo(
                     chat_id=channel_id,
                     photo=photo,
                     caption=caption,
+                    parse_mode=parse_mode,
                     reply_markup=reply_markup,
                     read_timeout=TELEGRAM_READ_TIMEOUT,
                     write_timeout=TELEGRAM_WRITE_TIMEOUT,
                 )
             logger.info("PUBLISH SUCCESS")
             return msg
+        except BadRequest as exc:
+            if "chat not found" in str(exc).lower():
+                logger.error(
+                    "NON-RETRYABLE ERROR: BadRequest: %s for chat_id=%s",
+                    exc,
+                    channel_id,
+                )
+            else:
+                logger.exception("Publish failed (BadRequest non-retryable): %s", exc)
+            raise exc
         except RETRYABLE_ERRORS as exc:
             last_error = exc
             logger.warning("UPLOAD TIMEOUT: %s", exc)
@@ -194,7 +227,9 @@ async def publish_to_channel_with_overflow(
     caption: str,
     reply_markup=None,
     products: list[dict[str, Any]] | None = None,
-    parse_mode: str = "HTML",
+    parse_mode: str | None = None,
+    publish_type: str = "PRODUCT",
+    source: str = "database",
 ) -> Message:
     """
     Publish photo to channel with automatic caption overflow handling.
@@ -210,11 +245,14 @@ async def publish_to_channel_with_overflow(
         caption: Full caption to send
         reply_markup: Inline keyboard for photo message
         products: List of product dicts for compact summary in overflow mode
-        parse_mode: Parse mode for text message (HTML/Markdown)
+        parse_mode: Parse mode for text message (None for plain text)
+        publish_type: Type of post being published (PRODUCT/CODE)
+        source: Destination configuration source (database/env)
 
     Returns:
         The photo message object
     """
+    caption = strip_html_tags(caption)
     caption_length = len(caption)
     overflow_triggered = caption_length > SAFE_CAPTION_LENGTH
     product_count = len(products) if products else 1
@@ -230,6 +268,7 @@ async def publish_to_channel_with_overflow(
         else:
             message_text = caption  # Fallback to full caption if no products
 
+        message_text = strip_html_tags(message_text)
         message_caption_length = len(message_text)
 
         logger.info(
@@ -259,7 +298,14 @@ async def publish_to_channel_with_overflow(
 
         # Send photo with short caption and inline keyboard
         photo_msg = await publish_to_channel(
-            bot, channel_id, photo_path, short_caption, reply_markup
+            bot,
+            channel_id,
+            photo_path,
+            short_caption,
+            reply_markup,
+            parse_mode=parse_mode,
+            publish_type=publish_type,
+            source=source,
         )
 
         # Send compact product summary as text message (no buttons)
@@ -297,5 +343,13 @@ async def publish_to_channel_with_overflow(
 
         logger.info("CAPTION: length=%d mode=normal", caption_length)
         return await publish_to_channel(
-            bot, channel_id, photo_path, caption, reply_markup
+            bot,
+            channel_id,
+            photo_path,
+            caption,
+            reply_markup,
+            parse_mode=parse_mode,
+            publish_type=publish_type,
+            source=source,
         )
+

@@ -309,7 +309,6 @@ async def publish_validated_product(
             caption,
             reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
             products=products,
-            parse_mode="HTML",
         )
         result.log_summary()
 
@@ -502,7 +501,6 @@ async def process_composite_urls(
             caption,
             reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
             products=products,
-            parse_mode="HTML",
         )
         result.log_summary()
 

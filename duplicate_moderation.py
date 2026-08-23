@@ -155,7 +155,6 @@ async def publish_and_record(
         publish_path,
         caption,
         products=products,
-        parse_mode="HTML",
     )
     result.log_summary()
 

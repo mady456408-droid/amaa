@@ -62,6 +62,8 @@ async def publish_to_destinations(
     reply_markup: Any = None,
     products: list[dict[str, str]] | None = None,
     parse_mode: str | None = None,
+    publish_type: str = "PRODUCT",
+    source: str = "database",
 ) -> MultiPublishResult:
     """Publish the same content to multiple enabled destinations.
 
@@ -73,6 +75,8 @@ async def publish_to_destinations(
         reply_markup: Inline keyboard markup
         products: List of product dicts for inline buttons
         parse_mode: Parse mode for caption
+        publish_type: Type of post being published (PRODUCT/CODE)
+        source: Destination configuration source (database/env)
 
     Returns:
         MultiPublishResult with results for each destination
@@ -101,7 +105,10 @@ async def publish_to_destinations(
                 reply_markup=reply_markup,
                 products=products,
                 parse_mode=parse_mode,
+                publish_type=publish_type,
+                source=source,
             )
+
 
             results.append(
                 PublishResult(

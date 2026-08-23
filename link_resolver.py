@@ -373,7 +373,7 @@ async def resolve_product_input(user_input: str, domain: str = "www.amazon.eg") 
         return None
 
     asin = asin.upper()
-    merchant_id = extract_merchant_id(target_url) or extract_merchant_id(text)
+    merchant_id = extract_merchant_id(text) or extract_merchant_id(target_url)
     seller_type, resolved_merchant_id = classify_seller_from_merchant_id(merchant_id)
     clean_url = build_clean_url(asin, domain, merchant_id=resolved_merchant_id)
 
