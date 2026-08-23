@@ -586,6 +586,55 @@ def _extract_offer_condition(listing: dict[str, Any]) -> str | None:
     return None
 
 
+def get_raw_listing_merchant_ids(item: Any | None) -> list[str]:
+    """Extract all merchant IDs present in an item's raw listings."""
+    if not item:
+        return []
+    if isinstance(item, dict):
+        listings = item.get("raw_listings") or []
+    else:
+        listings = getattr(item, "raw_listings", []) or []
+    m_ids: list[str] = []
+    for listing in listings:
+        merchant_info = (
+            listing.get("merchantInfo")
+            or listing.get("merchant")
+            or listing.get("seller")
+            or listing.get("sellerInfo")
+            or listing.get("merchantDetails")
+            or {}
+        )
+        if isinstance(merchant_info, str):
+            mid_val = merchant_info.strip().upper()
+            if mid_val and mid_val not in m_ids:
+                m_ids.append(mid_val)
+            continue
+
+        m_id = (
+            merchant_info.get("id")
+            or merchant_info.get("merchantId")
+            or merchant_info.get("sellerId")
+            or merchant_info.get("merchant_id")
+            or merchant_info.get("seller_id")
+            or listing.get("merchantId")
+            or listing.get("sellerId")
+            or listing.get("merchant_id")
+            or listing.get("seller_id")
+            or ""
+        ).strip().upper()
+
+        if not m_id:
+            for tid in (NEW_AMAZON_SELLER_ID, AMAZON_RESALE_SELLER_ID):
+                if tid in str(listing).upper():
+                    m_id = tid
+                    break
+
+        if m_id and m_id not in m_ids:
+            m_ids.append(m_id)
+
+    return m_ids
+
+
 def log_resale_offer_evidence(
     *,
     asin: str,
@@ -594,9 +643,14 @@ def log_resale_offer_evidence(
     price: str | None,
     availability: str,
     raw_listing_count: int,
+    available_merchant_ids: list[str] | None = None,
+    matching_listing: Any | None = None,
+    matching_condition: str | None = None,
     module: str = "creators_api",
 ) -> None:
     now_iso = datetime.now(timezone.utc).isoformat()
+    m_ids = available_merchant_ids or []
+    m_ids_str = json.dumps(m_ids)
     logger.info(
         "RESALE OFFER EVIDENCE:\n"
         "  asin=%s\n"
@@ -606,7 +660,8 @@ def log_resale_offer_evidence(
         "  price=%s\n"
         "  availability=%s\n"
         "  timestamp=%s\n"
-        "  raw_listing_count=%d",
+        "  raw_listing_count=%d\n"
+        "  available_merchant_ids=%s",
         asin.upper(),
         source,
         offer_found,
@@ -614,6 +669,67 @@ def log_resale_offer_evidence(
         availability,
         now_iso,
         raw_listing_count,
+        m_ids_str,
+    )
+
+    discrepancy_str = ""
+    if not offer_found and AMAZON_RESALE_SELLER_ID not in m_ids:
+        discrepancy_str = " (API/data-source discrepancy: merchant A2N2MP47XAP1MK absent in Creators API offersV2.listings)"
+
+    match_str = json.dumps(matching_listing) if isinstance(matching_listing, dict) else str(matching_listing or "None")
+    logger.info(
+        "RESALE RAW AUDIT:\n"
+        "  asin=%s\n"
+        "  target_merchant_id=A2N2MP47XAP1MK\n"
+        "  raw_listing_count=%d\n"
+        "  available_merchant_ids=%s\n"
+        "  matching_listing=%s\n"
+        "  matching_price=%s\n"
+        "  matching_availability=%s%s\n"
+        "  matching_condition=%s",
+        asin.upper(),
+        raw_listing_count,
+        m_ids_str,
+        match_str,
+        price or "None",
+        availability,
+        discrepancy_str,
+        matching_condition or "None",
+    )
+
+
+def log_new_offer_evidence(
+    *,
+    asin: str,
+    source: str,  # 'LIVE_API' or 'CACHE'
+    offer_found: bool,
+    price: str | None,
+    availability: str,
+    raw_listing_count: int,
+    available_merchant_ids: list[str] | None = None,
+    module: str = "creators_api",
+) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    m_ids_str = json.dumps(available_merchant_ids or [])
+    logger.info(
+        "NEW OFFER EVIDENCE:\n"
+        "  asin=%s\n"
+        "  merchant_id=A1ZVRGNO5AYLOV\n"
+        "  source=%s\n"
+        "  offer_found=%s\n"
+        "  price=%s\n"
+        "  availability=%s\n"
+        "  timestamp=%s\n"
+        "  raw_listing_count=%d\n"
+        "  available_merchant_ids=%s",
+        asin.upper(),
+        source,
+        offer_found,
+        price or "None",
+        availability,
+        now_iso,
+        raw_listing_count,
+        m_ids_str,
     )
 
 
@@ -658,25 +774,31 @@ def extract_seller_offer(
             listing.get("merchantInfo")
             or listing.get("merchant")
             or listing.get("seller")
+            or listing.get("sellerInfo")
+            or listing.get("merchantDetails")
             or {}
         )
-        m_id = (
-            merchant_info.get("id")
-            or merchant_info.get("merchantId")
-            or merchant_info.get("sellerId")
-            or merchant_info.get("merchant_id")
-            or merchant_info.get("seller_id")
-            or listing.get("merchantId")
-            or listing.get("sellerId")
-            or listing.get("merchant_id")
-            or listing.get("seller_id")
-            or ""
-        ).strip().upper()
+        if isinstance(merchant_info, str):
+            m_id = merchant_info.strip().upper()
+            m_name = m_id
+        else:
+            m_id = (
+                merchant_info.get("id")
+                or merchant_info.get("merchantId")
+                or merchant_info.get("sellerId")
+                or merchant_info.get("merchant_id")
+                or merchant_info.get("seller_id")
+                or listing.get("merchantId")
+                or listing.get("sellerId")
+                or listing.get("merchant_id")
+                or listing.get("seller_id")
+                or ""
+            ).strip().upper()
+            m_name = merchant_info.get("name") or merchant_info.get("displayName") or ""
 
         if not m_id and target_merchant_id in str(listing).upper():
             m_id = target_merchant_id
 
-        m_name = merchant_info.get("name") or merchant_info.get("displayName") or ""
         cond = listing.get("condition") or {}
         price_obj = listing.get("price") or {}
         is_buybox = listing.get("isBuyBoxWinner")

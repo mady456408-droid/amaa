@@ -30,7 +30,9 @@ from creators_api import (
     creators_api_configured,
     extract_seller_offer,
     get_creators_client,
+    get_raw_listing_merchant_ids,
     is_valid_asin,
+    log_new_offer_evidence,
     log_resale_offer_evidence,
 )
 from database import Database, compute_reference_price
@@ -356,8 +358,9 @@ async def evaluate_product_price_check(
         if prev_last_valid is None and latest_history:
             prev_last_valid = float(latest_history["final_price"])
 
+        raw_cnt = len(getattr(item, "raw_listings", []) or []) if item else 0
+        avail_m_ids = get_raw_listing_merchant_ids(item)
         if seller_type == "AMAZON_RESALE":
-            raw_cnt = len(getattr(item, "raw_listings", []) or []) if item else 0
             log_resale_offer_evidence(
                 asin=asin,
                 source="LIVE_API",
@@ -365,6 +368,18 @@ async def evaluate_product_price_check(
                 price=price_text,
                 availability=status,
                 raw_listing_count=raw_cnt,
+                available_merchant_ids=avail_m_ids,
+                module="price_monitoring",
+            )
+        else:
+            log_new_offer_evidence(
+                asin=asin,
+                source="LIVE_API",
+                offer_found=(status == "AVAILABLE"),
+                price=price_text,
+                availability=status,
+                raw_listing_count=raw_cnt,
+                available_merchant_ids=avail_m_ids,
                 module="price_monitoring",
             )
 

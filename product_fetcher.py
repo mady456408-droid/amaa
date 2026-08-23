@@ -29,6 +29,8 @@ from creators_api import (
     creators_api_configured,
     extract_seller_offer,
     get_creators_client,
+    get_raw_listing_merchant_ids,
+    log_new_offer_evidence,
     log_resale_offer_evidence,
 )
 from creators_title import resolve_frame_title
@@ -664,6 +666,7 @@ async def fetch_product(
 
                 source_val = "CACHE" if (cache_hit and cached_offer_found) else "LIVE_API"
                 raw_cnt = len(getattr(item, "raw_listings", []) or []) if item else 0
+                avail_m_ids = get_raw_listing_merchant_ids(item)
                 log_resale_offer_evidence(
                     asin=asin,
                     source=source_val,
@@ -671,11 +674,25 @@ async def fetch_product(
                     price=p_text,
                     availability=status,
                     raw_listing_count=raw_cnt,
+                    available_merchant_ids=avail_m_ids,
                     module="product_fetcher",
                 )
             else:
                 status, p_text, p_val, l_text, l_val, s_name, s_cond = (
                     extract_seller_offer(item, seller_type) if item else ("MISSING", None, None, None, None, None, None)
+                )
+                source_val = "CACHE" if cache_hit else "LIVE_API"
+                raw_cnt = len(getattr(item, "raw_listings", []) or []) if item else 0
+                avail_m_ids = get_raw_listing_merchant_ids(item)
+                log_new_offer_evidence(
+                    asin=asin,
+                    source=source_val,
+                    offer_found=(status == "AVAILABLE"),
+                    price=p_text,
+                    availability=status,
+                    raw_listing_count=raw_cnt,
+                    available_merchant_ids=avail_m_ids,
+                    module="product_fetcher",
                 )
 
             if not item or item.title == "Not found":
