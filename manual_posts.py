@@ -779,6 +779,7 @@ async def handle_publish_draft(
             apply_ai_rewrite,
             reason,
         )
+        seller_type = draft.get("seller_type", "NEW_AMAZON")
         if apply_ai_rewrite:
             logger.info("MANUAL POST → CALLING AI REWRITE FUNCTION")
             caption = rewrite_caption(caption, db, log_prefix="MANUAL POST", seller_type=seller_type)
@@ -818,8 +819,9 @@ async def handle_publish_draft(
                         draft["created_by"],
                         publish_result.message_id,
                         destination_id=publish_result.destination_id,
-                        seller_type=draft.get("seller_type", "NEW_AMAZON"),
+                        seller_type=draft.get("seller_type") or "NEW_AMAZON",
                         image_path=draft.get("image_path"),
+                        clean_url=draft.get("clean_url"),
                         **price_fields,
                     )
         if not db.set_draft_status(draft_id, "published"):

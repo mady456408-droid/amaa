@@ -191,6 +191,7 @@ async def publish_and_record(
                 destination_id=publish_result.destination_id,
                 seller_type=stype,
                 image_path=pending.get("image_path"),
+                clean_url=pending.get("clean_url"),
                 **price_fields,
             )
 

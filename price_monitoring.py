@@ -37,7 +37,7 @@ from database import Database, compute_reference_price
 from file_cleanup import cleanup_files
 from image_processor import apply_frame_creators_product
 from inline_buttons import build_inline_keyboard
-from link_resolver import build_clean_url, resolve_asin_from_input
+from link_resolver import build_clean_url, resolve_asin_from_input, resolve_product_input
 from product_fetcher import (
     _download_best_amazon_image,
     _require_screenshot,
@@ -959,6 +959,10 @@ async def run_single_product_price_check(db: Database, input_text: str) -> dict[
             new_price_val = item.offers["NEW_AMAZON"].get("price_value")
             new_price_txt = item.offers["NEW_AMAZON"].get("price_text")
 
+        resolved_input = await resolve_product_input(input_text, AMAZON_DOMAIN)
+        stype = resolved_input.seller_type if resolved_input else "NEW_AMAZON"
+        curl = resolved_input.clean_url if resolved_input else None
+
         db.add_published_product(
             asin=asin,
             title=title,
@@ -967,6 +971,8 @@ async def run_single_product_price_check(db: Database, input_text: str) -> dict[
             published_price=new_price_txt,
             published_price_value=new_price_val,
             published_currency="EGP",
+            seller_type=stype,
+            clean_url=curl,
         )
         product = db.get_published_product_by_asin(asin)
     else:

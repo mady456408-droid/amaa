@@ -846,16 +846,6 @@ class Database:
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         merchant_id = "A2N2MP47XAP1MK" if seller_type == "AMAZON_RESALE" else "A1ZVRGNO5AYLOV"
-        logger.info(
-            "SELLER LIFECYCLE:\n"
-            "  stage=ADD_PUBLISHED_PRODUCT\n"
-            "  asin=%s\n"
-            "  seller_type=%s\n"
-            "  merchant_id=%s",
-            asin.upper(),
-            seller_type,
-            merchant_id,
-        )
         with self._connect() as conn:
             cur = conn.execute(
                 """
@@ -883,7 +873,20 @@ class Database:
                 ),
             )
             conn.commit()
-            return int(cur.lastrowid)
+            pid = int(cur.lastrowid)
+            logger.info(
+                "SELLER LIFECYCLE:\n"
+                "  stage=ADD_PUBLISHED_PRODUCT\n"
+                "  asin=%s\n"
+                "  seller_type=%s\n"
+                "  merchant_id=%s\n"
+                "  published_id=%d",
+                asin.upper(),
+                seller_type,
+                merchant_id,
+                pid,
+            )
+            return pid
 
     def get_published_product(self, published_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -975,10 +978,12 @@ class Database:
                 "  stage=UPDATE_PUBLISHED_AFTER_REPUBLISH\n"
                 "  asin=%s\n"
                 "  seller_type=%s\n"
-                "  merchant_id=%s",
+                "  merchant_id=%s\n"
+                "  published_id=%d",
                 dict(current).get("asin") if current else "",
                 stype,
                 merchant_id,
+                published_id,
             )
 
             if current:
@@ -1463,7 +1468,8 @@ class Database:
             "  stage=CREATE_PENDING_APPROVAL\n"
             "  asin=%s\n"
             "  seller_type=%s\n"
-            "  merchant_id=%s",
+            "  merchant_id=%s\n"
+            "  published_id=None",
             asin.upper(),
             seller_type,
             merchant_id,
@@ -1552,7 +1558,8 @@ class Database:
             "  stage=CREATE_DRAFT_POST\n"
             "  asin=%s\n"
             "  seller_type=%s\n"
-            "  merchant_id=%s",
+            "  merchant_id=%s\n"
+            "  published_id=None",
             asin.upper(),
             seller_type,
             merchant_id,
