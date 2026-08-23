@@ -29,6 +29,7 @@ from creators_api import (
     creators_api_configured,
     extract_seller_offer,
     get_creators_client,
+    log_resale_offer_evidence,
 )
 from creators_title import resolve_frame_title
 from image_processor import apply_frame, apply_frame_creators_product
@@ -661,18 +662,16 @@ async def fetch_product(
                         extract_seller_offer(item, "AMAZON_RESALE") if item else ("MISSING", None, None, None, None, None, None)
                     )
 
-                logger.debug(
-                    "RESALE LIVE CHECK:\n"
-                    "  asin=%s\n"
-                    "  merchant_id=%s\n"
-                    "  offer_found=%s\n"
-                    "  price=%s\n"
-                    "  availability=%s",
-                    asin.upper(),
-                    AMAZON_RESALE_SELLER_ID,
-                    (status == "AVAILABLE"),
-                    p_text or "None",
-                    status,
+                source_val = "CACHE" if (cache_hit and cached_offer_found) else "LIVE_API"
+                raw_cnt = len(getattr(item, "raw_listings", []) or []) if item else 0
+                log_resale_offer_evidence(
+                    asin=asin,
+                    source=source_val,
+                    offer_found=(status == "AVAILABLE"),
+                    price=p_text,
+                    availability=status,
+                    raw_listing_count=raw_cnt,
+                    module="product_fetcher",
                 )
             else:
                 status, p_text, p_val, l_text, l_val, s_name, s_cond = (

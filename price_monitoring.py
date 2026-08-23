@@ -31,6 +31,7 @@ from creators_api import (
     extract_seller_offer,
     get_creators_client,
     is_valid_asin,
+    log_resale_offer_evidence,
 )
 from database import Database, compute_reference_price
 from file_cleanup import cleanup_files
@@ -354,6 +355,18 @@ async def evaluate_product_price_check(
         latest_history = bulk_history.get((asin, seller_type))
         if prev_last_valid is None and latest_history:
             prev_last_valid = float(latest_history["final_price"])
+
+        if seller_type == "AMAZON_RESALE":
+            raw_cnt = len(getattr(item, "raw_listings", []) or []) if item else 0
+            log_resale_offer_evidence(
+                asin=asin,
+                source="LIVE_API",
+                offer_found=(status == "AVAILABLE"),
+                price=price_text,
+                availability=status,
+                raw_listing_count=raw_cnt,
+                module="price_monitoring",
+            )
 
         logger.debug(
             "PRICE MONITOR → ASIN=%s SELLER=%s AVAILABILITY=%s PREV_AVAILABILITY=%s PREV_LAST_VALID=%s",
@@ -1649,18 +1662,16 @@ async def republish_published_product(application: Any, published_id: int) -> st
                             extract_seller_offer(item, "AMAZON_RESALE") if item else ("MISSING", None, None, None, None, None, None)
                         )
 
-                    logger.info(
-                        "RESALE LIVE CHECK:\n"
-                        "  asin=%s\n"
-                        "  merchant_id=%s\n"
-                        "  offer_found=%s\n"
-                        "  price=%s\n"
-                        "  availability=%s",
-                        asin.upper(),
-                        AMAZON_RESALE_SELLER_ID,
-                        (status == "AVAILABLE"),
-                        p_text or "None",
-                        status,
+                    source_val = "CACHE" if (cache_hit and cached_offer_found) else "LIVE_API"
+                    raw_cnt = len(getattr(item, "raw_listings", []) or []) if item else 0
+                    log_resale_offer_evidence(
+                        asin=asin,
+                        source=source_val,
+                        offer_found=(status == "AVAILABLE"),
+                        price=p_text,
+                        availability=status,
+                        raw_listing_count=raw_cnt,
+                        module="republish",
                     )
                 except Exception as exc:
                     logger.warning("RESALE CREATORS API FAILED\n  error=%s", exc)

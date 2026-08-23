@@ -53,6 +53,9 @@ DRAFT_PROFILE: list[str] = [
 
 PRICE_DROP_PROFILE: list[str] = [
     "offersV2.listings.price",
+    "offersV2.listings.dealDetails",
+    "offersV2.listings.merchantInfo",
+    "offersV2.listings.condition",
 ]
 
 SEARCH_PROFILE: list[str] = [
@@ -583,6 +586,37 @@ def _extract_offer_condition(listing: dict[str, Any]) -> str | None:
     return None
 
 
+def log_resale_offer_evidence(
+    *,
+    asin: str,
+    source: str,  # 'LIVE_API' or 'CACHE'
+    offer_found: bool,
+    price: str | None,
+    availability: str,
+    raw_listing_count: int,
+    module: str = "creators_api",
+) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    logger.info(
+        "RESALE OFFER EVIDENCE:\n"
+        "  asin=%s\n"
+        "  merchant_id=A2N2MP47XAP1MK\n"
+        "  source=%s\n"
+        "  offer_found=%s\n"
+        "  price=%s\n"
+        "  availability=%s\n"
+        "  timestamp=%s\n"
+        "  raw_listing_count=%d",
+        asin.upper(),
+        source,
+        offer_found,
+        price or "None",
+        availability,
+        now_iso,
+        raw_listing_count,
+    )
+
+
 def extract_seller_offer(
     item: Any | None,
     seller_type: str,
@@ -912,7 +946,12 @@ class CreatorsClient:
             for asin, item in batch_results.items():
                 results[asin] = item
                 if db is not None:
-                    cache_entries.append((asin, profile, item.to_dict(), ttl))
+                    item_dict = item.to_dict()
+                    cache_entries.append((asin, profile, item_dict, ttl))
+                    if profile in ("draft", "price_drop"):
+                        other_prof = "price_drop" if profile == "draft" else "draft"
+                        other_ttl = PROFILE_TTL_SECONDS.get(other_prof, 3600)
+                        cache_entries.append((asin, other_prof, item_dict, other_ttl))
             if db is not None and cache_entries:
                 db.set_creators_cache_bulk(cache_entries)
 
