@@ -157,6 +157,15 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_destinations_enabled_order
                     ON destinations (enabled, sort_order);
+
+                CREATE TABLE IF NOT EXISTS creators_api_usage_daily (
+                    date TEXT PRIMARY KEY,
+                    requests_sent INTEGER NOT NULL DEFAULT 0,
+                    successful_requests INTEGER NOT NULL DEFAULT 0,
+                    rate_limited_requests INTEGER NOT NULL DEFAULT 0,
+                    last_request_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             conn.commit()
@@ -911,11 +920,10 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def list_unique_published_products(self) -> list[dict[str, Any]]:
-        """Most recent published row per unique ASIN."""
+    def list_unique_published_products(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """Most recent published row per unique ASIN, prioritized by oldest last_checked_at."""
         with self._connect() as conn:
-            rows = conn.execute(
-                """
+            query = """
                 SELECT p.*
                 FROM published_products p
                 INNER JOIN (
@@ -923,9 +931,14 @@ class Database:
                     FROM published_products
                     GROUP BY asin
                 ) latest ON p.asin = latest.asin AND p.published_at = latest.max_at
-                ORDER BY p.published_at DESC
-                """
-            ).fetchall()
+                ORDER BY 
+                    CASE WHEN p.last_checked_at IS NULL THEN 0 ELSE 1 END ASC,
+                    p.last_checked_at ASC,
+                    p.id ASC
+            """
+            if limit is not None and limit > 0:
+                query += f" LIMIT {int(limit)}"
+            rows = conn.execute(query).fetchall()
         return [dict(r) for r in rows]
 
     def update_published_product_price_check(
@@ -1227,11 +1240,12 @@ class Database:
         If any query fails, the entire transaction rolls back cleanly.
         Supports seller_state_updates items as 4-tuples or 5-tuples (with reference_price).
         """
+        now_iso = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             for curr_final, product_id in product_check_updates:
                 conn.execute(
-                    "UPDATE published_products SET last_price_check = ? WHERE id = ?",
-                    (curr_final, product_id),
+                    "UPDATE published_products SET last_price_check = ?, last_checked_at = ? WHERE id = ?",
+                    (curr_final, now_iso, product_id),
                 )
 
             for item_update in seller_state_updates:
@@ -2139,4 +2153,62 @@ class Database:
         if fallback_id:
             return [{"id": 0, "title": "Default Destination", "chat_id": fallback_id, "enabled": 1}]
         return []
+
+    # --- Creators API Daily Budget Usage ---
+
+    def get_daily_api_usage(self, date_str: str | None = None) -> dict[str, Any]:
+        if not date_str:
+            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT date, requests_sent, successful_requests, rate_limited_requests, last_request_at, updated_at
+                FROM creators_api_usage_daily
+                WHERE date = ?
+                """,
+                (date_str,),
+            ).fetchone()
+        if row:
+            return dict(row)
+        return {
+            "date": date_str,
+            "requests_sent": 0,
+            "successful_requests": 0,
+            "rate_limited_requests": 0,
+            "last_request_at": None,
+            "updated_at": None,
+        }
+
+    def get_today_api_requests_count(self, date_str: str | None = None) -> int:
+        usage = self.get_daily_api_usage(date_str)
+        return int(usage.get("requests_sent") or 0)
+
+    def record_daily_api_request(
+        self,
+        date_str: str | None = None,
+        *,
+        is_success: bool = True,
+        is_429: bool = False,
+    ) -> None:
+        if not date_str:
+            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        succ_inc = 1 if is_success else 0
+        rate_inc = 1 if is_429 else 0
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creators_api_usage_daily
+                    (date, requests_sent, successful_requests, rate_limited_requests, last_request_at, updated_at)
+                VALUES (?, 1, ?, ?, ?, ?)
+                ON CONFLICT(date) DO UPDATE SET
+                    requests_sent = requests_sent + 1,
+                    successful_requests = successful_requests + excluded.successful_requests,
+                    rate_limited_requests = rate_limited_requests + excluded.rate_limited_requests,
+                    last_request_at = excluded.last_request_at,
+                    updated_at = excluded.updated_at
+                """,
+                (date_str, succ_inc, rate_inc, now_iso, now_iso),
+            )
+            conn.commit()
 

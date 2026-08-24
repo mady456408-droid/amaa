@@ -19,7 +19,13 @@ from telegram.ext import CallbackQueryHandler, ContextTypes
 from ai_caption import build_product_caption
 from ai_rewriter import rewrite_caption
 from amazon_shortener import shorten_amazon_url
-from config import ADMIN_USER_IDS, AMAZON_DOMAIN, FRAME_PRODUCT_IMAGES
+from config import (
+    ADMIN_USER_IDS,
+    AMAZON_DOMAIN,
+    CREATORS_API_TPD_LIMIT,
+    CREATORS_API_TPD_RESERVE,
+    FRAME_PRODUCT_IMAGES,
+)
 from coupon_price import coupon_apply_kwargs_from_product, parse_price_number
 from creators_api import (
     AMAZON_RESALE_SELLER_ID,
@@ -1063,25 +1069,45 @@ async def run_single_product_price_check(db: Database, input_text: str) -> dict[
 
 
 async def run_price_check(application: Any, admin_chat_id: int | str | None = None) -> None:
-    """Check all unique published products for NEW & RESALE sellers, update history & notify."""
+    """Check published products for NEW & RESALE sellers using a quota-aware rotating scheduler."""
     db: Database = application.bot_data["db"]
     bot: Bot = application.bot
-    destination_id = application.bot_data.get("destination_channel_id")
     min_drop = db.get_min_price_drop()
 
     t_total_start = time.monotonic()
 
-    logger.debug("PRICE MONITOR → EVENT LOOP TEST START")
+    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    usable_budget = max(
+        0,
+        CREATORS_API_TPD_LIMIT - int(CREATORS_API_TPD_LIMIT * CREATORS_API_TPD_RESERVE),
+    )
+    today_used = db.get_today_api_requests_count(today_utc)
+    remaining_budget = max(0, usable_budget - today_used)
 
-    # Stage 1: Fetch active tracked products
+    if remaining_budget == 0:
+        logger.warning(
+            "PRICE MONITOR → DAILY API BUDGET EXHAUSTED date=%s used=%d limit=%d",
+            today_utc,
+            today_used,
+            usable_budget,
+        )
+        db.set_last_price_check_time()
+        return
+
+    interval_min = db.get_price_monitor_interval_min()
+    ticks_per_day = (24.0 * 60.0) / max(1.0, float(interval_min))
+    target_batches_per_tick = max(1, int(usable_budget / ticks_per_day))
+    batches_to_run = min(target_batches_per_tick, remaining_budget)
+    asin_limit = batches_to_run * 10
+
+    # Stage 1: Fetch active tracked products (prioritized by oldest last_checked_at)
     t_stage1_start = time.monotonic()
-    products = db.list_unique_published_products()
+    products = db.list_unique_published_products(limit=asin_limit)
     t_stage1_end = time.monotonic()
     t_fetch_products = t_stage1_end - t_stage1_start
 
     total = len(products)
     logger.info("PRICE MONITOR → CYCLE START total_products=%s min_drop=%s", total, min_drop)
-    logger.debug("PRICE MONITOR → AUTOMATIC CHECK START total_products=%s min_drop=%s", total, min_drop)
 
     if not products:
         db.set_last_price_check_time()
@@ -1142,7 +1168,25 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
     max_attempts = 2
     fetched_items: dict[str, Any] = {}
 
+    logger.info(
+        "PRICE MONITOR → TICK date=%s budget_remaining=%d batches_selected=%d total_asins=%d",
+        today_utc,
+        remaining_budget,
+        total_batches,
+        len(valid_asins),
+    )
+
     for batch_index, batch_asins in enumerate(batches):
+        current_used = db.get_today_api_requests_count(today_utc)
+        if current_used >= usable_budget:
+            logger.warning(
+                "PRICE MONITOR → DAILY API BUDGET EXHAUSTED date=%s used=%d limit=%d",
+                today_utc,
+                current_used,
+                usable_budget,
+            )
+            break
+
         logger.debug(
             "PRICE MONITOR → BATCH START batch=%s/%s size=%s",
             batch_index + 1,
@@ -1200,18 +1244,10 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                     retry_after = getattr(exc, "retry_after", None)
                     cooldown_sec = retry_after if (retry_after is not None and retry_after > 0) else 1.8
 
-                    if hasattr(client, "record_monitoring_cooldown"):
-                        res = client.record_monitoring_cooldown(cooldown_sec)
-                        if inspect.isawaitable(res):
-                            await res
-
                     if attempt < max_attempts:
                         retry_count += 1
                         logger.warning(
-                            "PRICE MONITOR → API RATE LIMITED\n"
-                            "batch=%s/%s\n"
-                            "retry=%s\n"
-                            "cooldown=%.1fs",
+                            "PRICE MONITOR → API RATE LIMITED batch=%s/%s retry=%s cooldown=%.1fs",
                             batch_index + 1,
                             total_batches,
                             attempt,
@@ -1227,9 +1263,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                         batch_skipped_due_to_429 = True
 
                         logger.warning(
-                            "PRICE MONITOR → BATCH SKIPPED\n"
-                            "batch=%s/%s\n"
-                            "reason=HTTP_429",
+                            "PRICE MONITOR → BATCH SKIPPED batch=%s/%s reason=HTTP_429",
                             batch_index + 1,
                             total_batches,
                         )
@@ -1270,21 +1304,22 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
 
         if batch_skipped_due_to_429:
             consecutive_429 += 1
-            if consecutive_429 >= 3:
+            limiter = getattr(client, "_monitoring_limiter", None)
+            if limiter and hasattr(limiter, "record_429_backoff"):
+                res = limiter.record_429_backoff(retry_after)
+                if inspect.isawaitable(res):
+                    global_cooldown_sec = await res
+                else:
+                    global_cooldown_sec = res if isinstance(res, (int, float)) else 30.0
+            else:
                 global_cooldown_sec = 30.0
-                logger.warning(
-                    "PRICE MONITOR → GLOBAL RATE LIMIT BACKOFF\n"
-                    "consecutive_429=%s\n"
-                    "cooldown=%.0fs",
-                    consecutive_429,
-                    global_cooldown_sec,
-                )
-                if hasattr(client, "record_monitoring_cooldown"):
-                    res = client.record_monitoring_cooldown(global_cooldown_sec)
-                    if inspect.isawaitable(res):
-                        await res
-                await asyncio.sleep(global_cooldown_sec)
-                consecutive_429 = 0
+
+            logger.warning(
+                "PRICE MONITOR → GLOBAL RATE LIMIT BACKOFF consecutive_429=%s cooldown=%.0fs",
+                consecutive_429,
+                global_cooldown_sec,
+            )
+            await asyncio.sleep(global_cooldown_sec)
 
     t_stage3_end = time.monotonic()
     t_api_requests = t_stage3_end - t_stage3_start

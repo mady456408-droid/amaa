@@ -24,7 +24,10 @@ from amazon_image_url import pick_best_primary_image_url
 from coupon_price import parse_price_number
 from config import (
     CREATORS_API_TPD,
+    CREATORS_API_TPD_LIMIT,
+    CREATORS_API_TPD_RESERVE,
     CREATORS_API_TPS,
+    CREATORS_API_TPS_LIMIT,
     CREATORS_CREDENTIAL_ID,
     CREATORS_CREDENTIAL_SECRET,
     CREATORS_CREDENTIAL_VERSION,
@@ -432,8 +435,8 @@ class CreatorsRateLimiter:
         self,
         name: str = "REALTIME",
         *,
-        tps: float = CREATORS_API_TPS,
-        tpd: int = CREATORS_API_TPD,
+        tps: float = CREATORS_API_TPS_LIMIT,
+        tpd: int = CREATORS_API_TPD_LIMIT,
     ):
         self.name = name
         self._min_interval = 1.0 / tps if tps > 0 else 0.0
@@ -447,7 +450,7 @@ class CreatorsRateLimiter:
         self._cooldown_until = 0.0
         self._consecutive_429 = 0
 
-    async def acquire(self, source: str = "REALTIME") -> None:
+    async def acquire(self, source: str = "REALTIME", db: Any = None) -> None:
         wait = 0.0
         async with self._lock:
             self._queue_depth += 1
@@ -458,7 +461,17 @@ class CreatorsRateLimiter:
                 self._day_key = day_key
                 self._day_count = 0
 
-            if self._day_count >= self._tpd:
+            usable_budget = max(
+                0,
+                CREATORS_API_TPD_LIMIT - int(CREATORS_API_TPD_LIMIT * CREATORS_API_TPD_RESERVE),
+            )
+
+            if db is not None and hasattr(db, "get_today_api_requests_count"):
+                used_today = db.get_today_api_requests_count(day_key)
+            else:
+                used_today = self._day_count
+
+            if used_today >= usable_budget:
                 self._queue_depth -= 1
                 raise CreatorsAPIError(
                     "Daily Creators API quota exceeded",
@@ -512,6 +525,37 @@ class CreatorsRateLimiter:
                     duration,
                     self._cooldown_until,
                 )
+
+    async def record_429_backoff(self, retry_after: float | None = None) -> float:
+        """Calculate step adaptive cooldown on persistent 429 errors (30s -> 60s -> 120s -> 240s -> 300s)."""
+        async with self._lock:
+            self._consecutive_429 += 1
+            if self._consecutive_429 == 1:
+                cooldown = 30.0
+            elif self._consecutive_429 == 2:
+                cooldown = 60.0
+            elif self._consecutive_429 == 3:
+                cooldown = 120.0
+            elif self._consecutive_429 == 4:
+                cooldown = 240.0
+            else:
+                cooldown = 300.0
+
+            if retry_after is not None and retry_after > cooldown:
+                cooldown = retry_after
+
+            now = time.monotonic()
+            target = now + cooldown
+            if target > self._cooldown_until:
+                self._cooldown_until = target
+                logger.debug(
+                    "CREATORS ADAPTIVE BACKOFF: name=%s consecutive_429=%d cooldown=%.2fs",
+                    self.name,
+                    self._consecutive_429,
+                    cooldown,
+                )
+
+            return cooldown
 
     async def record_success(self) -> None:
         """Reset consecutive 429 counter on success."""
@@ -1066,7 +1110,7 @@ class CreatorsClient:
 
         for i in range(0, len(missing), 10):
             batch = missing[i : i + 10]
-            batch_results = await self._fetch_items_batch(batch, resources, limiter=limiter, source=source_label)
+            batch_results = await self._fetch_items_batch(batch, resources, limiter=limiter, source=source_label, db=db)
             ttl = PROFILE_TTL_SECONDS.get(profile, 3600)
             cache_entries = []
             for asin, item in batch_results.items():
@@ -1089,9 +1133,11 @@ class CreatorsClient:
         resources: list[str],
         limiter: CreatorsRateLimiter | None = None,
         source: str = "REALTIME",
+        db: Any = None,
     ) -> dict[str, NormalizedItem]:
         target_limiter = limiter or self._realtime_limiter
-        await target_limiter.acquire(source=source)
+        await target_limiter.acquire(source=source, db=db)
+        today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         try:
             token = await self._token_manager.get_token()
 
@@ -1127,7 +1173,19 @@ class CreatorsClient:
 
             try:
                 resp = await client.post(url, json=body, headers=headers)
+                if db is not None and hasattr(db, "record_daily_api_request"):
+                    db.record_daily_api_request(
+                        today_key,
+                        is_success=(resp.status_code == 200),
+                        is_429=(resp.status_code == 429),
+                    )
             except httpx.HTTPError as exc:
+                if db is not None and hasattr(db, "record_daily_api_request"):
+                    db.record_daily_api_request(
+                        today_key,
+                        is_success=False,
+                        is_429=False,
+                    )
                 raise CreatorsAPIError(f"HTTP error: {exc}") from exc
 
             response_text = resp.text or ""
