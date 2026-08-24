@@ -478,7 +478,7 @@ class CreatorsRateLimiter:
             self._active_requests += 1
 
             cooldown_rem = max(0.0, self._cooldown_until - now)
-            logger.info(
+            logger.debug(
                 "CREATORS RATE LIMIT: name=%s source=%s wait_ms=%.1f active_requests=%s queue_depth=%s cooldown_remaining_ms=%.1f",
                 self.name,
                 source,
@@ -506,7 +506,7 @@ class CreatorsRateLimiter:
             target = now + max(0.0, duration)
             if target > self._cooldown_until:
                 self._cooldown_until = target
-                logger.info(
+                logger.debug(
                     "CREATORS RATE LIMIT COOLDOWN: name=%s duration=%.2fs cooldown_until=%.2f",
                     self.name,
                     duration,

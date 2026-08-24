@@ -1126,7 +1126,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
     # Stage 3: Creators API batch requests with Adaptive Concurrency & Global 429 Cooldown
     t_stage3_start = time.monotonic()
 
-    adaptive_sem = AdaptiveSemaphore(initial=4, min_limit=1, max_limit=4, recovery_threshold=3)
+    adaptive_sem = AdaptiveSemaphore(initial=1, min_limit=1, max_limit=1, recovery_threshold=3)
     batches = [valid_asins[i : i + 10] for i in range(0, len(valid_asins), 10)]
     total_batches = len(batches)
     batch_durations: list[float] = []
@@ -1135,15 +1135,16 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
     successful_batches = 0
     failed_batches = 0
     count_429 = 0
+    consecutive_429 = 0
     retry_count = 0
     success_after_retry = 0
     permanently_failed = 0
     unique_asins_failed = 0
 
-    max_attempts = 4
+    max_attempts = 2
 
     async def fetch_batch(batch_index: int, batch_asins: list[str]) -> dict[str, Any]:
-        nonlocal successful_batches, failed_batches, count_429, retry_count
+        nonlocal successful_batches, failed_batches, count_429, consecutive_429, retry_count
         nonlocal success_after_retry, permanently_failed, unique_asins_failed
 
         async with adaptive_sem:
@@ -1174,12 +1175,15 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
 
                     async with metrics_lock:
                         successful_batches += 1
+                        consecutive_429 = 0
                         if attempt > 1:
                             success_after_retry += 1
 
                     await adaptive_sem.record_success()
                     if hasattr(client, "record_monitoring_success"):
-                        await client.record_monitoring_success()
+                        res = client.record_monitoring_success()
+                        if inspect.isawaitable(res):
+                            await res
 
                     if attempt > 1:
                         logger.debug(
@@ -1202,13 +1206,11 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                     if exc.status_code == 429:
                         async with metrics_lock:
                             count_429 += 1
+                            consecutive_429 += 1
+                            curr_consecutive = consecutive_429
 
-                        new_concurrency = await adaptive_sem.record_429()
+                        await adaptive_sem.record_429()
 
-                        # Exponential backoff with random jitter:
-                        # attempt 1: 1.0 + [0.0, 1.0] -> 1-2s
-                        # attempt 2: 2.0 + [0.0, 2.0] -> 2-4s
-                        # attempt 3: 4.0 + [0.0, 4.0] -> 4-8s
                         base_sec = float(2 ** (attempt - 1))
                         jitter = random.uniform(0.0, base_sec)
                         cooldown_sec = base_sec + jitter
@@ -1217,41 +1219,40 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                         if retry_after is not None and retry_after > cooldown_sec:
                             cooldown_sec = retry_after
 
-                        # Set global cooldown on CreatorsRateLimiter so all other batches pause
-                        if hasattr(client, "record_monitoring_cooldown"):
-                            await client.record_monitoring_cooldown(cooldown_sec)
-
-                        logger.warning(
-                            "PRICE MONITOR → RATE LIMIT\n"
-                            "event=429\n"
-                            "batch=%s/%s\n"
-                            "attempt=%s/%s\n"
-                            "cooldown=%.2fs\n"
-                            "concurrency=%s\n"
-                            "retry_after=%s",
-                            batch_index + 1,
-                            total_batches,
-                            attempt,
-                            max_attempts,
-                            cooldown_sec,
-                            new_concurrency,
-                            retry_after if retry_after is not None else "none",
-                        )
+                        if curr_consecutive >= 3:
+                            global_cooldown_sec = 30.0
+                            logger.warning(
+                                "PRICE MONITOR → GLOBAL RATE LIMIT BACKOFF\n"
+                                "consecutive_429=%s\n"
+                                "cooldown=%.0fs",
+                                curr_consecutive,
+                                global_cooldown_sec,
+                            )
+                            if hasattr(client, "record_monitoring_cooldown"):
+                                res = client.record_monitoring_cooldown(global_cooldown_sec)
+                                if inspect.isawaitable(res):
+                                    await res
+                            await asyncio.sleep(global_cooldown_sec)
+                        elif attempt < max_attempts:
+                            logger.warning(
+                                "PRICE MONITOR → API RATE LIMITED\n"
+                                "batch=%s/%s\n"
+                                "retry=%s\n"
+                                "cooldown=%.1fs",
+                                batch_index + 1,
+                                total_batches,
+                                attempt,
+                                cooldown_sec,
+                            )
+                            if hasattr(client, "record_monitoring_cooldown"):
+                                res = client.record_monitoring_cooldown(cooldown_sec)
+                                if inspect.isawaitable(res):
+                                    await res
+                            await asyncio.sleep(cooldown_sec)
 
                         if attempt < max_attempts:
                             async with metrics_lock:
                                 retry_count += 1
-
-                            logger.debug(
-                                "PRICE MONITOR → API 429 batch=%s/%s attempt=%s/%s retry_in=%.2fs concurrency=%s",
-                                batch_index + 1,
-                                total_batches,
-                                attempt,
-                                max_attempts,
-                                cooldown_sec,
-                                new_concurrency,
-                            )
-                            await asyncio.sleep(cooldown_sec)
                             continue
                         else:
                             tb1 = time.monotonic()
@@ -1262,11 +1263,12 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                                 permanently_failed += 1
                                 unique_asins_failed += len(batch_asins)
 
-                            logger.error(
-                                "PRICE MONITOR → BATCH FAILED batch=%s/%s error_type=HTTP_429 attempts=%s permanently_failed=True",
+                            logger.warning(
+                                "PRICE MONITOR → BATCH SKIPPED\n"
+                                "batch=%s/%s\n"
+                                "reason=HTTP_429",
                                 batch_index + 1,
                                 total_batches,
-                                attempt,
                             )
                             return {}
                     else:
