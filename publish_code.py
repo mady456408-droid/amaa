@@ -4,6 +4,7 @@ Allows admins to publish Amazon coupon/code posts instantly using the
 existing code.png image template.
 """
 
+import html
 import logging
 import os
 import time
@@ -11,7 +12,7 @@ import uuid
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
-from telegram import Update
+from telegram import MessageEntity, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 
@@ -116,13 +117,25 @@ def generate_code_image(
     return output_path
 
 
+def utf16_len(text: str) -> int:
+    """Calculate length of text in UTF-16 code units (for Telegram API entity offsets)."""
+    return len(text.encode("utf-16-le")) // 2
 
-def build_code_caption(code: str) -> str:
-    """Build Telegram caption using the exact required structure."""
-    return (
+
+def build_code_caption(code: str) -> tuple[str, list[MessageEntity]]:
+    """
+    Build Telegram photo caption and native MessageEntity.CODE for coupon code.
+
+    Returns:
+        tuple of (caption_text, list_of_caption_entities)
+    """
+    prefix = (
         "كوبون خصم 15% بحد أقصى 150 جنيه على موقع أمازون\n"
         "\n"
-        f"كوبون الخصم : {code}\n"
+        "كوبون الخصم :\n"
+    )
+    suffix = (
+        "\n"
         "================\n"
         "عروض مجمعهالك علي :-\n"
         "\n"
@@ -134,6 +147,11 @@ def build_code_caption(code: str) -> str:
         "================\n"
         "كل اللي في الرسالة دي عروض ومع خصم الكوبون هتكون بأسعار ممتازة ، الكوبون صالح للاستخدام مرة واحدة لكل عميل ويُطبق مع الخصومات الإضافية ، وله عدد محدود من الاستخدام وينفذ سريعاً"
     )
+    caption = f"{prefix}{code}{suffix}"
+    offset = utf16_len(prefix)
+    length = utf16_len(code)
+    entity = MessageEntity(type=MessageEntity.CODE, offset=offset, length=length)
+    return caption, [entity]
 
 
 async def start_publish_code(
@@ -204,7 +222,7 @@ async def receive_publish_code(
         image_path = generate_code_image(code)
         logger.info("CODE IMAGE GENERATED path=%s", image_path)
 
-        caption = build_code_caption(code)
+        caption, caption_entities = build_code_caption(code)
 
         result = await publish_to_destinations(
             bot=context.application.bot,
@@ -213,9 +231,10 @@ async def receive_publish_code(
             caption=caption,
             reply_markup=None,
             products=None,
-            parse_mode="HTML",
+            parse_mode=None,
             publish_type="CODE",
             source="database",
+            caption_entities=caption_entities,
         )
         result.log_summary()
 

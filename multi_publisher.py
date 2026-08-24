@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from telegram import Bot, Message
+from telegram import Bot, Message, MessageEntity
 from telegram_publisher import publish_to_channel_with_overflow
 
 logger = logging.getLogger(__name__)
@@ -64,6 +64,7 @@ async def publish_to_destinations(
     parse_mode: str | None = None,
     publish_type: str = "PRODUCT",
     source: str = "database",
+    caption_entities: list[MessageEntity] | None = None,
 ) -> MultiPublishResult:
     """Publish the same content to multiple enabled destinations.
 
@@ -77,6 +78,7 @@ async def publish_to_destinations(
         parse_mode: Parse mode for caption
         publish_type: Type of post being published (PRODUCT/CODE)
         source: Destination configuration source (database/env)
+        caption_entities: Explicit list of MessageEntity objects for photo caption
 
     Returns:
         MultiPublishResult with results for each destination
@@ -107,6 +109,7 @@ async def publish_to_destinations(
                 parse_mode=parse_mode,
                 publish_type=publish_type,
                 source=source,
+                caption_entities=caption_entities,
             )
 
 

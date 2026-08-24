@@ -3,7 +3,7 @@ import logging
 from typing import Any
 
 import httpx
-from telegram import Bot, Message
+from telegram import Bot, Message, MessageEntity
 from telegram.error import BadRequest, NetworkError, TimedOut
 
 from config import (
@@ -162,6 +162,7 @@ async def publish_to_channel(
     parse_mode: str | None = None,
     publish_type: str = "PRODUCT",
     source: str = "database",
+    caption_entities: list[MessageEntity] | None = None,
 ) -> Message:
     caption = strip_html_tags(caption)
     last_error: Exception | None = None
@@ -185,6 +186,7 @@ async def publish_to_channel(
                     caption=caption,
                     parse_mode=parse_mode,
                     reply_markup=reply_markup,
+                    caption_entities=caption_entities,
                     read_timeout=TELEGRAM_READ_TIMEOUT,
                     write_timeout=TELEGRAM_WRITE_TIMEOUT,
                 )
@@ -230,6 +232,7 @@ async def publish_to_channel_with_overflow(
     parse_mode: str | None = None,
     publish_type: str = "PRODUCT",
     source: str = "database",
+    caption_entities: list[MessageEntity] | None = None,
 ) -> Message:
     """
     Publish photo to channel with automatic caption overflow handling.
@@ -248,6 +251,7 @@ async def publish_to_channel_with_overflow(
         parse_mode: Parse mode for text message (None for plain text)
         publish_type: Type of post being published (PRODUCT/CODE)
         source: Destination configuration source (database/env)
+        caption_entities: Explicit list of MessageEntity objects for photo caption
 
     Returns:
         The photo message object
@@ -306,6 +310,7 @@ async def publish_to_channel_with_overflow(
             parse_mode=parse_mode,
             publish_type=publish_type,
             source=source,
+            caption_entities=caption_entities,
         )
 
         # Send compact product summary as text message (no buttons)
@@ -351,5 +356,6 @@ async def publish_to_channel_with_overflow(
             parse_mode=parse_mode,
             publish_type=publish_type,
             source=source,
+            caption_entities=caption_entities,
         )
 
