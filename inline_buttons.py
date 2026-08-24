@@ -231,7 +231,7 @@ def build_inline_keyboard(
         if product_buttons:
             final_keyboard.append([InlineKeyboardButton("─" * 20, callback_data="separator")])
             final_keyboard.extend(keyboard)
-        logger.info(
+        logger.debug(
             "INLINE BUTTONS: products=%d generated=%d duplicates_removed=%d fixed=%d",
             len(products),
             len(product_buttons),
@@ -242,7 +242,7 @@ def build_inline_keyboard(
     else:
         # Product buttons first, then separator, then fixed buttons (default)
         keyboard.extend(fixed_button_rows)
-        logger.info(
+        logger.debug(
             "INLINE BUTTONS: products=%d generated=%d duplicates_removed=%d fixed=%d",
             len(products),
             len(product_buttons),

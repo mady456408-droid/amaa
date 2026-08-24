@@ -383,7 +383,7 @@ async def fetch_products(
         for i in range(0, len(unique_asins), chunk_size)
     ]
 
-    logger.info(
+    logger.debug(
         "BULK GETITEMS: requested=%d chunks=%d",
         requested,
         len(chunks),
@@ -488,7 +488,7 @@ async def fetch_products(
                         )
                         failed += 1
 
-                logger.info(
+                logger.debug(
                     "BULK GETITEMS: chunk %d/%d returned=%d",
                     chunk_index,
                     len(chunks),
@@ -582,7 +582,7 @@ async def fetch_products(
     elapsed_ms = (time.monotonic() - start_time) * 1000
     returned = len(results)
 
-    logger.info(
+    logger.debug(
         "BULK GETITEMS: requested=%d returned=%d failed=%d api_calls=%d time_ms=%.0f",
         requested,
         returned,
@@ -743,7 +743,7 @@ async def fetch_product(
                     module="product_fetcher",
                 )
 
-            logger.info(
+            logger.debug(
                 "REPUBLISH OFFER SELECTION:\n"
                 "  asin=%s\n"
                 "  seller_type=%s\n"
@@ -794,7 +794,7 @@ async def fetch_product(
                 }
 
             if scrape_key.startswith("republish_"):
-                logger.info(
+                logger.debug(
                     "REPUBLISH OFFER SELECTION:\n"
                     "  seller_type=%s\n"
                     "  target_merchant_id=%s\n"
@@ -805,7 +805,7 @@ async def fetch_product(
                     target_merchant_id,
                 )
 
-            logger.info(
+            logger.debug(
                 "SELLER LIFECYCLE:\n"
                 "  stage=PRODUCT_FETCH_COMPLETE\n"
                 "  asin=%s\n"
@@ -877,7 +877,7 @@ async def fetch_product(
             except Exception as exc:
                 logger.debug("Product image resolution skipped: %s", exc)
 
-            logger.info(
+            logger.debug(
                 "SCRAPER DEBUG title=%r price=%r list_price=%r coupon=%r "
                 "coupon_already_applied=%s seller_name=%r seller_type=%s source=creators",
                 product["title"],
