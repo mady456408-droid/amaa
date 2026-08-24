@@ -712,6 +712,9 @@ async def fetch_product(
                         extract_seller_offer(item, "AMAZON_RESALE") if item else ("MISSING", None, None, None, None, None, None)
                     )
 
+                op_context = "republish" if scrape_key.startswith("republish_") else "monitor"
+                log_log_fn = logger.info if op_context == "republish" else logger.debug
+
                 source_val = "CACHE" if (cache_hit and cached_offer_found) else "LIVE_API"
                 raw_cnt = len(getattr(item, "raw_listings", []) or []) if item else 0
                 avail_m_ids = get_raw_listing_merchant_ids(item)
@@ -724,8 +727,12 @@ async def fetch_product(
                     raw_listing_count=raw_cnt,
                     available_merchant_ids=avail_m_ids,
                     module="product_fetcher",
+                    operation=op_context,
                 )
             else:
+                op_context = "republish" if scrape_key.startswith("republish_") else "monitor"
+                log_log_fn = logger.info if op_context == "republish" else logger.debug
+
                 status, p_text, p_val, l_text, l_val, s_name, s_cond = (
                     extract_seller_offer(item, seller_type) if item else ("MISSING", None, None, None, None, None, None)
                 )
@@ -741,9 +748,10 @@ async def fetch_product(
                     raw_listing_count=raw_cnt,
                     available_merchant_ids=avail_m_ids,
                     module="product_fetcher",
+                    operation=op_context,
                 )
 
-            logger.debug(
+            log_log_fn(
                 "REPUBLISH OFFER SELECTION:\n"
                 "  asin=%s\n"
                 "  seller_type=%s\n"
@@ -794,7 +802,7 @@ async def fetch_product(
                 }
 
             if scrape_key.startswith("republish_"):
-                logger.debug(
+                log_log_fn(
                     "REPUBLISH OFFER SELECTION:\n"
                     "  seller_type=%s\n"
                     "  target_merchant_id=%s\n"
@@ -805,7 +813,7 @@ async def fetch_product(
                     target_merchant_id,
                 )
 
-            logger.debug(
+            log_log_fn(
                 "SELLER LIFECYCLE:\n"
                 "  stage=PRODUCT_FETCH_COMPLETE\n"
                 "  asin=%s\n"

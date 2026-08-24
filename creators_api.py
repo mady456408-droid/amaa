@@ -647,19 +647,31 @@ def log_resale_offer_evidence(
     matching_listing: Any | None = None,
     matching_condition: str | None = None,
     module: str = "creators_api",
+    operation: str = "monitor",
 ) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
     m_ids = available_merchant_ids or []
     m_ids_str = json.dumps(m_ids)
-    logger.debug(
-        "RESALE OFFER EVIDENCE asin=%s target=A2N2MP47XAP1MK found=%s availability=%s price=%s merchants=%s raw_count=%d source=%s module=%s",
+    log_func = logger.info if operation == "republish" else logger.debug
+    log_func(
+        "RESALE OFFER EVIDENCE:\n"
+        "  asin=%s\n"
+        "  merchant_id=A2N2MP47XAP1MK\n"
+        "  source=%s\n"
+        "  offer_found=%s\n"
+        "  price=%s\n"
+        "  availability=%s\n"
+        "  timestamp=%s\n"
+        "  raw_listing_count=%d\n"
+        "  available_merchant_ids=%s",
         asin.upper(),
-        offer_found,
-        availability,
-        price or "None",
-        m_ids_str,
-        raw_listing_count,
         source,
-        module,
+        offer_found,
+        price or "None",
+        availability,
+        now_iso,
+        raw_listing_count,
+        m_ids_str,
     )
 
     discrepancy_str = ""
@@ -667,8 +679,16 @@ def log_resale_offer_evidence(
         discrepancy_str = " (API/data-source discrepancy: merchant A2N2MP47XAP1MK absent in Creators API offersV2.listings)"
 
     match_str = json.dumps(matching_listing) if isinstance(matching_listing, dict) else str(matching_listing or "None")
-    logger.debug(
-        "RESALE RAW AUDIT asin=%s target=A2N2MP47XAP1MK raw_count=%d merchants=%s match_listing=%s price=%s availability=%s%s condition=%s module=%s",
+    log_func(
+        "RESALE RAW AUDIT:\n"
+        "  asin=%s\n"
+        "  target_merchant_id=A2N2MP47XAP1MK\n"
+        "  raw_listing_count=%d\n"
+        "  available_merchant_ids=%s\n"
+        "  matching_listing=%s\n"
+        "  matching_price=%s\n"
+        "  matching_availability=%s%s\n"
+        "  matching_condition=%s",
         asin.upper(),
         raw_listing_count,
         m_ids_str,
@@ -677,7 +697,6 @@ def log_resale_offer_evidence(
         availability,
         discrepancy_str,
         matching_condition or "None",
-        module,
     )
 
 
@@ -691,18 +710,30 @@ def log_new_offer_evidence(
     raw_listing_count: int,
     available_merchant_ids: list[str] | None = None,
     module: str = "creators_api",
+    operation: str = "monitor",
 ) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
     m_ids_str = json.dumps(available_merchant_ids or [])
-    logger.debug(
-        "NEW OFFER EVIDENCE asin=%s target=A1ZVRGNO5AYLOV found=%s availability=%s price=%s merchants=%s raw_count=%d source=%s module=%s",
+    log_func = logger.info if operation == "republish" else logger.debug
+    log_func(
+        "NEW OFFER EVIDENCE:\n"
+        "  asin=%s\n"
+        "  merchant_id=A1ZVRGNO5AYLOV\n"
+        "  source=%s\n"
+        "  offer_found=%s\n"
+        "  price=%s\n"
+        "  availability=%s\n"
+        "  timestamp=%s\n"
+        "  raw_listing_count=%d\n"
+        "  available_merchant_ids=%s",
         asin.upper(),
-        offer_found,
-        availability,
-        price or "None",
-        m_ids_str,
-        raw_listing_count,
         source,
-        module,
+        offer_found,
+        price or "None",
+        availability,
+        now_iso,
+        raw_listing_count,
+        m_ids_str,
     )
 
 

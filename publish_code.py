@@ -54,7 +54,12 @@ def generate_code_image(
     draw = ImageDraw.Draw(img)
 
     # Locate font file from local fonts directory
+    base_dir = Path(__file__).resolve().parent
     font_candidates = [
+        base_dir / "fonts" / "NotoSans-Bold.ttf",
+        base_dir / "fonts" / "Cairo.ttf",
+        base_dir / "fonts" / "NotoSansArabic-Bold.ttf",
+        base_dir / "fonts" / "NotoSans-Regular.ttf",
         "fonts/NotoSans-Bold.ttf",
         "fonts/Cairo.ttf",
         "fonts/NotoSansArabic-Bold.ttf",
@@ -63,30 +68,28 @@ def generate_code_image(
     font_path = None
     for candidate in font_candidates:
         if os.path.exists(candidate):
-            font_path = candidate
+            font_path = str(candidate)
             break
 
     placeholder_center_x = CODE_BOX_X + CODE_BOX_WIDTH / 2.0
     placeholder_center_y = CODE_BOX_Y + CODE_BOX_HEIGHT / 2.0
 
-    horizontal_padding = 40
-    vertical_padding = 15
+    # Max width and height constraints within the code box (729x156)
+    # Safe padding ensures text stays clean, readable, and strictly inside box
+    max_w = CODE_BOX_WIDTH - 60  # 669 px
+    max_h = CODE_BOX_HEIGHT - 30 # 126 px
 
-    max_w = CODE_BOX_WIDTH - 2 * horizontal_padding
-    max_h = CODE_BOX_HEIGHT - 2 * vertical_padding
-
-    font_size = 120
-
-    if font_path:
-        font = ImageFont.truetype(font_path, font_size)
-    else:
-        font = ImageFont.load_default()
+    font_size = 100
 
     while font_size > 12:
         if font_path:
             font = ImageFont.truetype(font_path, font_size)
         else:
-            font = ImageFont.load_default()
+            try:
+                font = ImageFont.load_default(size=font_size)
+            except TypeError:
+                font = ImageFont.load_default()
+
         bbox = draw.textbbox((0, 0), code, font=font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
@@ -101,7 +104,7 @@ def generate_code_image(
     x = placeholder_center_x - (bbox[0] + bbox[2]) / 2.0
     y = placeholder_center_y - (bbox[1] + bbox[3]) / 2.0
 
-    # Draw code in black color inside the yellow/green box
+    # Draw code in bold black color inside the code box
     draw.text((x, y), code, fill=(0, 0, 0), font=font)
 
     if not output_path:
