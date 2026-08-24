@@ -138,7 +138,7 @@ def _log_creators_request(
     languages_of_preference: list[str] | None = None,
 ) -> None:
     """Log GetItems payload metadata — never log secrets or tokens."""
-    logger.info(
+    logger.debug(
         "CREATORS REQUEST:\n"
         "version=v%s\n"
         "marketplace=%s\n"
@@ -159,7 +159,7 @@ def _log_creators_request(
 
 def _log_creators_headers(*, marketplace: str) -> None:
     """Log sanitized outbound headers — Authorization value is always masked."""
-    logger.info(
+    logger.debug(
         "CREATORS HEADERS:\n"
         "Content-Type=application/json\n"
         "Authorization=Bearer ****\n"
@@ -184,7 +184,7 @@ def _log_creators_response(resp: httpx.Response) -> dict[str, Any] | None:
     # Full body on errors (403 diagnosis); truncate large success payloads.
     logged_text = text if resp.status_code >= 400 else text[:_RESPONSE_BODY_LOG_LIMIT]
 
-    logger.info(
+    logger.debug(
         "CREATORS RESPONSE:\n"
         "status=%s\n"
         "headers=%r\n"

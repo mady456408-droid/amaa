@@ -1123,15 +1123,13 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         "offersV2.listings.condition",
     ]
 
-    # Stage 3: Creators API batch requests with Adaptive Concurrency & Global 429 Cooldown
+    # Stage 3: Creators API batch requests (Strictly Sequential Execution)
     t_stage3_start = time.monotonic()
 
-    adaptive_sem = AdaptiveSemaphore(initial=1, min_limit=1, max_limit=1, recovery_threshold=3)
     batches = [valid_asins[i : i + 10] for i in range(0, len(valid_asins), 10)]
     total_batches = len(batches)
     batch_durations: list[float] = []
 
-    metrics_lock = asyncio.Lock()
     successful_batches = 0
     failed_batches = 0
     count_429 = 0
@@ -1142,177 +1140,151 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
     unique_asins_failed = 0
 
     max_attempts = 2
+    fetched_items: dict[str, Any] = {}
 
-    async def fetch_batch(batch_index: int, batch_asins: list[str]) -> dict[str, Any]:
-        nonlocal successful_batches, failed_batches, count_429, consecutive_429, retry_count
-        nonlocal success_after_retry, permanently_failed, unique_asins_failed
+    for batch_index, batch_asins in enumerate(batches):
+        logger.debug(
+            "PRICE MONITOR → BATCH START batch=%s/%s size=%s",
+            batch_index + 1,
+            total_batches,
+            len(batch_asins),
+        )
 
-        async with adaptive_sem:
-            curr_active = adaptive_sem.active_tasks
+        tb0 = time.monotonic()
+        batch_items: dict[str, Any] | None = None
+        batch_skipped_due_to_429 = False
 
-            logger.debug(
-                "PRICE MONITOR → BATCH START batch=%s/%s size=%s active_tasks=%s concurrency_limit=%s",
-                batch_index + 1,
-                total_batches,
-                len(batch_asins),
-                curr_active,
-                adaptive_sem.concurrency,
-            )
+        for attempt in range(1, max_attempts + 1):
+            try:
+                items = await client.get_items(
+                    batch_asins,
+                    expanded_profile,
+                    db=db,
+                    profile="price_drop",
+                )
+                tb1 = time.monotonic()
+                elapsed = tb1 - tb0
+                batch_durations.append(elapsed)
 
-            tb0 = time.monotonic()
+                successful_batches += 1
+                consecutive_429 = 0
+                if attempt > 1:
+                    success_after_retry += 1
 
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    items = await client.get_items(
-                        batch_asins,
-                        expanded_profile,
-                        db=db,
-                        profile="price_drop",
+                if hasattr(client, "record_monitoring_success"):
+                    res = client.record_monitoring_success()
+                    if inspect.isawaitable(res):
+                        await res
+
+                if attempt > 1:
+                    logger.debug(
+                        "PRICE MONITOR → BATCH SUCCESS AFTER RETRY batch=%s/%s attempt=%s duration=%.3fs",
+                        batch_index + 1,
+                        total_batches,
+                        attempt,
+                        elapsed,
                     )
-                    tb1 = time.monotonic()
-                    elapsed = tb1 - tb0
-                    batch_durations.append(elapsed)
+                else:
+                    logger.debug(
+                        "PRICE MONITOR → API BATCH END batch=%s/%s elapsed=%.3fs",
+                        batch_index + 1,
+                        total_batches,
+                        elapsed,
+                    )
+                batch_items = items or {}
+                break
 
-                    async with metrics_lock:
-                        successful_batches += 1
-                        consecutive_429 = 0
-                        if attempt > 1:
-                            success_after_retry += 1
+            except CreatorsAPIError as exc:
+                if exc.status_code == 429:
+                    count_429 += 1
+                    retry_after = getattr(exc, "retry_after", None)
+                    cooldown_sec = retry_after if (retry_after is not None and retry_after > 0) else 1.8
 
-                    await adaptive_sem.record_success()
-                    if hasattr(client, "record_monitoring_success"):
-                        res = client.record_monitoring_success()
+                    if hasattr(client, "record_monitoring_cooldown"):
+                        res = client.record_monitoring_cooldown(cooldown_sec)
                         if inspect.isawaitable(res):
                             await res
 
-                    if attempt > 1:
-                        logger.debug(
-                            "PRICE MONITOR → BATCH SUCCESS AFTER RETRY batch=%s/%s attempt=%s duration=%.3fs",
+                    if attempt < max_attempts:
+                        retry_count += 1
+                        logger.warning(
+                            "PRICE MONITOR → API RATE LIMITED\n"
+                            "batch=%s/%s\n"
+                            "retry=%s\n"
+                            "cooldown=%.1fs",
                             batch_index + 1,
                             total_batches,
                             attempt,
-                            elapsed,
+                            cooldown_sec,
                         )
-                    else:
-                        logger.debug(
-                            "PRICE MONITOR → API BATCH END batch=%s/%s elapsed=%.3fs",
-                            batch_index + 1,
-                            total_batches,
-                            elapsed,
-                        )
-                    return items or {}
-
-                except CreatorsAPIError as exc:
-                    if exc.status_code == 429:
-                        async with metrics_lock:
-                            count_429 += 1
-                            consecutive_429 += 1
-                            curr_consecutive = consecutive_429
-
-                        await adaptive_sem.record_429()
-
-                        base_sec = float(2 ** (attempt - 1))
-                        jitter = random.uniform(0.0, base_sec)
-                        cooldown_sec = base_sec + jitter
-
-                        retry_after = getattr(exc, "retry_after", None)
-                        if retry_after is not None and retry_after > cooldown_sec:
-                            cooldown_sec = retry_after
-
-                        if curr_consecutive >= 3:
-                            global_cooldown_sec = 30.0
-                            logger.warning(
-                                "PRICE MONITOR → GLOBAL RATE LIMIT BACKOFF\n"
-                                "consecutive_429=%s\n"
-                                "cooldown=%.0fs",
-                                curr_consecutive,
-                                global_cooldown_sec,
-                            )
-                            if hasattr(client, "record_monitoring_cooldown"):
-                                res = client.record_monitoring_cooldown(global_cooldown_sec)
-                                if inspect.isawaitable(res):
-                                    await res
-                            await asyncio.sleep(global_cooldown_sec)
-                        elif attempt < max_attempts:
-                            logger.warning(
-                                "PRICE MONITOR → API RATE LIMITED\n"
-                                "batch=%s/%s\n"
-                                "retry=%s\n"
-                                "cooldown=%.1fs",
-                                batch_index + 1,
-                                total_batches,
-                                attempt,
-                                cooldown_sec,
-                            )
-                            if hasattr(client, "record_monitoring_cooldown"):
-                                res = client.record_monitoring_cooldown(cooldown_sec)
-                                if inspect.isawaitable(res):
-                                    await res
-                            await asyncio.sleep(cooldown_sec)
-
-                        if attempt < max_attempts:
-                            async with metrics_lock:
-                                retry_count += 1
-                            continue
-                        else:
-                            tb1 = time.monotonic()
-                            elapsed = tb1 - tb0
-                            batch_durations.append(elapsed)
-                            async with metrics_lock:
-                                failed_batches += 1
-                                permanently_failed += 1
-                                unique_asins_failed += len(batch_asins)
-
-                            logger.warning(
-                                "PRICE MONITOR → BATCH SKIPPED\n"
-                                "batch=%s/%s\n"
-                                "reason=HTTP_429",
-                                batch_index + 1,
-                                total_batches,
-                            )
-                            return {}
+                        await asyncio.sleep(cooldown_sec)
+                        continue
                     else:
                         tb1 = time.monotonic()
                         elapsed = tb1 - tb0
                         batch_durations.append(elapsed)
-                        async with metrics_lock:
-                            failed_batches += 1
-                            permanently_failed += 1
-                            unique_asins_failed += len(batch_asins)
+                        failed_batches += 1
+                        batch_skipped_due_to_429 = True
 
-                        logger.error(
-                            "PRICE MONITOR → BATCH FAILED batch=%s/%s exc=%s permanently_failed=True",
+                        logger.warning(
+                            "PRICE MONITOR → BATCH SKIPPED\n"
+                            "batch=%s/%s\n"
+                            "reason=HTTP_429",
                             batch_index + 1,
                             total_batches,
-                            exc,
                         )
-                        return {}
-                except Exception as exc:
+                        break
+                else:
                     tb1 = time.monotonic()
                     elapsed = tb1 - tb0
                     batch_durations.append(elapsed)
-                    async with metrics_lock:
-                        failed_batches += 1
-                        permanently_failed += 1
-                        unique_asins_failed += len(batch_asins)
+                    failed_batches += 1
+                    permanently_failed += 1
+                    unique_asins_failed += len(batch_asins)
 
                     logger.error(
-                        "PRICE MONITOR → BATCH UNEXPECTED ERROR batch=%s/%s exc=%s permanently_failed=True",
+                        "PRICE MONITOR → BATCH FAILED batch=%s/%s exc=%s permanently_failed=True",
                         batch_index + 1,
                         total_batches,
                         exc,
                     )
-                    return {}
+                    break
+            except Exception as exc:
+                tb1 = time.monotonic()
+                elapsed = tb1 - tb0
+                batch_durations.append(elapsed)
+                failed_batches += 1
+                permanently_failed += 1
+                unique_asins_failed += len(batch_asins)
 
-            return {}
+                logger.error(
+                    "PRICE MONITOR → BATCH UNEXPECTED ERROR batch=%s/%s exc=%s permanently_failed=True",
+                    batch_index + 1,
+                    total_batches,
+                    exc,
+                )
+                break
 
-    batch_tasks = [fetch_batch(idx, b) for idx, b in enumerate(batches)]
-    batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+        if batch_items is not None:
+            fetched_items.update(batch_items)
 
-    fetched_items: dict[str, Any] = {}
-    for res in batch_results:
-        if isinstance(res, dict):
-            fetched_items.update(res)
+        if batch_skipped_due_to_429:
+            consecutive_429 += 1
+            if consecutive_429 >= 3:
+                global_cooldown_sec = 30.0
+                logger.warning(
+                    "PRICE MONITOR → GLOBAL RATE LIMIT BACKOFF\n"
+                    "consecutive_429=%s\n"
+                    "cooldown=%.0fs",
+                    consecutive_429,
+                    global_cooldown_sec,
+                )
+                if hasattr(client, "record_monitoring_cooldown"):
+                    res = client.record_monitoring_cooldown(global_cooldown_sec)
+                    if inspect.isawaitable(res):
+                        await res
+                await asyncio.sleep(global_cooldown_sec)
+                consecutive_429 = 0
 
     t_stage3_end = time.monotonic()
     t_api_requests = t_stage3_end - t_stage3_start
@@ -1333,7 +1305,6 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         "success_after_retry=%s\n"
         "permanently_failed=%s\n"
         "unique_asins_failed=%s\n"
-        "current_monitoring_concurrency=%s\n"
         "cooldown_remaining=%.2fs",
         total_batches,
         successful_batches,
@@ -1343,7 +1314,6 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         success_after_retry,
         permanently_failed,
         unique_asins_failed,
-        adaptive_sem.concurrency,
         cooldown_rem,
     )
 
