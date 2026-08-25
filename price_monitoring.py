@@ -1385,8 +1385,13 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
     t_avail_updates = 0.0
     t_drop_calc = 0.0
 
+    skipped_disabled_products_count = 0
     for asin, product in asin_to_product.items():
         logger.debug("PRICE MONITOR → ASIN=%s", asin)
+
+        if hasattr(db, "is_published_product_disabled") and db.is_published_product_disabled(asin):
+            skipped_disabled_products_count += 1
+            continue
 
         item = fetched_items.get(asin)
         eval_res = await evaluate_product_price_check(db, product, item, bulk_history, min_drop)
@@ -1421,7 +1426,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
     t_db_writes = t_stage6_end - t_stage6_start
     db_write_count = len(product_check_updates) + len(seller_state_updates) + len(history_records)
 
-    total_seller_checks = total * 2
+    total_seller_checks = (total - skipped_disabled_products_count) * 2
     invalid_asins_new = len(invalid_asins)
     invalid_asins_resale = len(invalid_asins)
 

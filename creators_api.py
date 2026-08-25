@@ -102,11 +102,47 @@ class CreatorsAPIError(Exception):
         status_code: int | None = None,
         response_body: str | None = None,
         retry_after: float | None = None,
+        inaccessible_asins: list[str] | None = None,
     ):
         super().__init__(message)
         self.status_code = status_code
         self.response_body = response_body
         self.retry_after = retry_after
+        self.inaccessible_asins = inaccessible_asins or []
+
+
+def extract_inaccessible_asins(errors_data: Any, batch_asins: list[str] | None = None) -> list[str]:
+    """
+    Extract ASINs from Creators API error structures matching 'ItemId ... is not accessible'.
+    Accepts errors_data as list, dict, or string response body.
+    """
+    if not errors_data:
+        return []
+
+    found_asins: set[str] = set()
+
+    if isinstance(errors_data, (list, dict)):
+        try:
+            text = json.dumps(errors_data)
+        except Exception:
+            text = str(errors_data)
+    else:
+        text = str(errors_data)
+
+    if "is not accessible" in text.lower():
+        # Match pattern: ItemId <ASIN> is not accessible
+        matches = re.findall(r"ItemId\s+([A-Z0-9]{10})\s+is\s+not\s+accessible", text, re.IGNORECASE)
+        for m in matches:
+            found_asins.add(m.strip().upper())
+
+        # Fallback: if batch_asins provided, check if any ASIN in batch appears in text alongside 'is not accessible'
+        if batch_asins:
+            for asin in batch_asins:
+                clean_asin = asin.strip().upper()
+                if clean_asin in text.upper():
+                    found_asins.add(clean_asin)
+
+    return sorted(list(found_asins))
 
 
 def _mask_partner_tag(tag: str) -> str:
@@ -1212,10 +1248,18 @@ class CreatorsClient:
                     response_body=response_text[:_RESPONSE_BODY_LOG_LIMIT],
                 )
             if resp.status_code >= 400:
+                inaccessible = extract_inaccessible_asins(response_text, batch_asins=asins)
+                if inaccessible:
+                    for bad_asin in inaccessible:
+                        if db is not None and hasattr(db, "disable_published_product_by_asin"):
+                            db.disable_published_product_by_asin(bad_asin)
+                        else:
+                            logger.warning("PRICE MONITOR → PRODUCT DISABLED asin=%s reason=ITEM_NOT_ACCESSIBLE", bad_asin)
                 raise CreatorsAPIError(
-                    "Request failed HTTP {resp.status_code}",
+                    f"Request failed HTTP {resp.status_code}",
                     status_code=resp.status_code,
                     response_body=response_text[:_RESPONSE_BODY_LOG_LIMIT],
+                    inaccessible_asins=inaccessible,
                 )
 
             try:
@@ -1228,6 +1272,13 @@ class CreatorsClient:
 
             if data.get("errors"):
                 logger.warning("CREATORS API partial errors: %s", data["errors"])
+                inaccessible = extract_inaccessible_asins(data["errors"], batch_asins=asins)
+                if inaccessible:
+                    for bad_asin in inaccessible:
+                        if db is not None and hasattr(db, "disable_published_product_by_asin"):
+                            db.disable_published_product_by_asin(bad_asin)
+                        else:
+                            logger.warning("PRICE MONITOR → PRODUCT DISABLED asin=%s reason=ITEM_NOT_ACCESSIBLE", bad_asin)
 
             items = (data.get("itemsResult") or {}).get("items") or []
             out: dict[str, NormalizedItem] = {}

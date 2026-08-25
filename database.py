@@ -215,6 +215,7 @@ class Database:
                 ("seller_type", "TEXT NOT NULL DEFAULT 'NEW_AMAZON'"),
                 ("clean_url", "TEXT"),
                 ("image_path", "TEXT"),
+                ("is_active", "INTEGER NOT NULL DEFAULT 1"),
             ):
                 if col not in published_cols:
                     conn.execute(f"ALTER TABLE published_products ADD COLUMN {col} {col_type}")
@@ -931,6 +932,7 @@ class Database:
                     FROM published_products
                     GROUP BY asin
                 ) latest ON p.asin = latest.asin AND p.published_at = latest.max_at
+                WHERE COALESCE(p.is_active, 1) = 1
                 ORDER BY 
                     CASE WHEN p.last_checked_at IS NULL THEN 0 ELSE 1 END ASC,
                     p.last_checked_at ASC,
@@ -2211,4 +2213,34 @@ class Database:
                 (date_str, succ_inc, rate_inc, now_iso, now_iso),
             )
             conn.commit()
+
+    def disable_published_product_by_asin(self, asin: str) -> bool:
+        """Disable a product for price monitoring (sets is_active = 0). Returns True if row was updated."""
+        if not asin:
+            return False
+        clean_asin = asin.strip().upper()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE published_products SET is_active = 0 WHERE UPPER(asin) = UPPER(?) AND COALESCE(is_active, 1) = 1",
+                (clean_asin,),
+            )
+            conn.commit()
+            updated = cur.rowcount > 0
+        if updated:
+            logger.warning("PRICE MONITOR → PRODUCT DISABLED asin=%s reason=ITEM_NOT_ACCESSIBLE", clean_asin)
+        return updated
+
+    def is_published_product_disabled(self, asin: str) -> bool:
+        """Check if an ASIN is disabled for monitoring (is_active = 0)."""
+        if not asin:
+            return False
+        clean_asin = asin.strip().upper()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT is_active FROM published_products WHERE UPPER(asin) = UPPER(?) ORDER BY published_at DESC LIMIT 1",
+                (clean_asin,),
+            ).fetchone()
+        if row and row["is_active"] is not None and int(row["is_active"]) == 0:
+            return True
+        return False
 
