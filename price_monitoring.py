@@ -1276,7 +1276,12 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                         async with _metrics_lock:
                             count_429 += 1
                         retry_after = getattr(exc, "retry_after", None)
-                        cooldown_sec = retry_after if (retry_after is not None and retry_after > 0) else 1.8
+                        limiter = getattr(client, "rate_limiter", None) or getattr(client, "_monitoring_limiter", None)
+                        if limiter and hasattr(limiter, "get_cooldown_remaining"):
+                            rem = limiter.get_cooldown_remaining()
+                            cooldown_sec = rem if rem > 0 else (retry_after if (retry_after is not None and retry_after > 0) else 2.0)
+                        else:
+                            cooldown_sec = retry_after if (retry_after is not None and retry_after > 0) else 2.0
 
                         if attempt < max_attempts:
                             async with _metrics_lock:

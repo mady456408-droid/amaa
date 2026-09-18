@@ -113,7 +113,8 @@ class CreatorsAPIError(Exception):
 
 def extract_inaccessible_asins(errors_data: Any, batch_asins: list[str] | None = None) -> list[str]:
     """
-    Extract ASINs from Creators API error structures matching 'ItemId ... is not accessible'.
+    Extract ASINs from Creators API error structures matching 'is not accessible',
+    'provided in the request is invalid', 'is invalid', or 'InvalidParameterValue'.
     Accepts errors_data as list, dict, or string response body.
     """
     if not errors_data:
@@ -129,13 +130,35 @@ def extract_inaccessible_asins(errors_data: Any, batch_asins: list[str] | None =
     else:
         text = str(errors_data)
 
-    if "is not accessible" in text.lower():
-        # Match pattern: ItemId <ASIN> is not accessible
-        matches = re.findall(r"ItemId\s+([A-Z0-9]{10})\s+is\s+not\s+accessible", text, re.IGNORECASE)
+    text_lower = text.lower()
+
+    invalid_item_keywords = [
+        "is not accessible",
+        "provided in the request is invalid",
+        "is invalid",
+        "is not valid",
+        "invalidparametervalue",
+    ]
+
+    has_invalid_keyword = any(kw in text_lower for kw in invalid_item_keywords)
+
+    if has_invalid_keyword:
+        # Match pattern: ItemId[s] <ASIN> ...
+        matches = re.findall(
+            r"ItemId[s]?\s+([A-Z0-9]{10})\s+(?:is\s+not\s+accessible|provided\s+in\s+the\s+request\s+is\s+invalid|is\s+invalid|is\s+not\s+valid)",
+            text,
+            re.IGNORECASE,
+        )
         for m in matches:
             found_asins.add(m.strip().upper())
 
-        # Fallback: if batch_asins provided, check if any ASIN in batch appears in text alongside 'is not accessible'
+        # Fallback 1: ItemId[s] <ASIN> anywhere in invalid error response
+        if not found_asins:
+            general_matches = re.findall(r"ItemId[s]?\s+([A-Z0-9]{10})", text, re.IGNORECASE)
+            for m in general_matches:
+                found_asins.add(m.strip().upper())
+
+        # Fallback 2: if batch_asins provided, check if any ASIN in batch appears in text
         if batch_asins:
             for asin in batch_asins:
                 clean_asin = asin.strip().upper()
@@ -563,22 +586,22 @@ class CreatorsRateLimiter:
                 )
 
     async def record_429_backoff(self, retry_after: float | None = None) -> float:
-        """Calculate step adaptive cooldown on persistent 429 errors (30s -> 60s -> 120s -> 240s -> 300s)."""
+        """Calculate step adaptive cooldown on 429 errors (respect Retry-After if provided, else bounded step backoff)."""
         async with self._lock:
             self._consecutive_429 += 1
-            if self._consecutive_429 == 1:
-                cooldown = 30.0
-            elif self._consecutive_429 == 2:
-                cooldown = 60.0
-            elif self._consecutive_429 == 3:
-                cooldown = 120.0
-            elif self._consecutive_429 == 4:
-                cooldown = 240.0
+            if retry_after is not None and retry_after > 0:
+                cooldown = float(retry_after)
             else:
-                cooldown = 300.0
-
-            if retry_after is not None and retry_after > cooldown:
-                cooldown = retry_after
+                if self._consecutive_429 == 1:
+                    cooldown = 2.0
+                elif self._consecutive_429 == 2:
+                    cooldown = 5.0
+                elif self._consecutive_429 == 3:
+                    cooldown = 15.0
+                elif self._consecutive_429 == 4:
+                    cooldown = 30.0
+                else:
+                    cooldown = 60.0
 
             now = time.monotonic()
             target = now + cooldown
@@ -1068,10 +1091,11 @@ class CreatorsClient:
     partner_tag: str = CREATORS_PARTNER_TAG
     _http: httpx.AsyncClient | None = field(default=None, repr=False)
     _token_manager: TokenManager | None = field(default=None, repr=False)
-    _realtime_limiter: CreatorsRateLimiter = field(default_factory=lambda: CreatorsRateLimiter("REALTIME"))
-    _monitoring_limiter: CreatorsRateLimiter = field(default_factory=lambda: CreatorsRateLimiter("MONITOR"))
+    _shared_limiter: CreatorsRateLimiter = field(default_factory=lambda: CreatorsRateLimiter("CREATORS_SHARED"))
 
     def __post_init__(self) -> None:
+        self._realtime_limiter = self._shared_limiter
+        self._monitoring_limiter = self._shared_limiter
         if self._token_manager is None:
             self._token_manager = TokenManager(
                 self.credential_id,
@@ -1079,6 +1103,10 @@ class CreatorsClient:
                 self.version,
                 http_client=self._http,
             )
+
+    @property
+    def rate_limiter(self) -> CreatorsRateLimiter:
+        return self._shared_limiter
 
     async def close(self) -> None:
         if self._http:
@@ -1249,6 +1277,10 @@ class CreatorsClient:
                         retry_after_val = float(retry_after_hdr)
                     except ValueError:
                         pass
+
+                if target_limiter is not None:
+                    await target_limiter.record_429_backoff(retry_after_val)
+
                 raise CreatorsAPIError(
                     "Rate limited",
                     status_code=429,
