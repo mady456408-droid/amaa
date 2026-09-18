@@ -24,6 +24,7 @@ from config import (
     AMAZON_DOMAIN,
     CREATORS_API_TPD_LIMIT,
     CREATORS_API_TPD_RESERVE,
+    CREATORS_API_TPS_LIMIT,
     FRAME_PRODUCT_IMAGES,
 )
 from coupon_price import coupon_apply_kwargs_from_product, parse_price_number
@@ -306,6 +307,7 @@ async def evaluate_product_price_check(
     item: Any | None,
     bulk_history: dict[tuple[str, str], dict[str, Any]],
     min_drop: float = 1.0,
+    bulk_ref_history: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """
     Core per-product price evaluation logic. Shared identically between
@@ -491,7 +493,10 @@ async def evaluate_product_price_check(
         product_check_updates.append((curr_final, product["id"]))
 
         # Calculate robust reference price for this (asin, seller_type)
-        ph_recs = db.get_price_history_records(asin, seller_type=seller_type, limit=100)
+        if bulk_ref_history is not None:
+            ph_recs = bulk_ref_history.get((asin, seller_type), [])
+        else:
+            ph_recs = db.get_price_history_records(asin, seller_type=seller_type, limit=100)
         curr_rec = {"final_price": curr_final, "availability": "AVAILABLE"}
         calc_ref = compute_reference_price(ph_recs + [curr_rec])
         stored_ref = product.get("new_reference_price") if seller_type == "NEW_AMAZON" else product.get("resale_reference_price")
@@ -1149,7 +1154,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         "offersV2.listings.condition",
     ]
 
-    # Stage 3: Creators API batch requests (Strictly Sequential Execution)
+    # Stage 3: Creators API batch requests (Concurrent via AdaptiveSemaphore)
     t_stage3_start = time.monotonic()
 
     batches = [valid_asins[i : i + 10] for i in range(0, len(valid_asins), 10)]
@@ -1167,159 +1172,205 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
 
     max_attempts = 2
     fetched_items: dict[str, Any] = {}
+    _fetched_items_lock = asyncio.Lock()
+    _metrics_lock = asyncio.Lock()
+
+    # In-memory budget counter — avoids per-batch DB query
+    budget_used = today_used
+    _budget_lock = asyncio.Lock()
+
+    # Derive concurrency from configured TPS — at TPS=1 this is 1 (sequential).
+    # The shared CreatorsRateLimiter remains authoritative for outbound request spacing.
+    tps_concurrency = max(1, min(4, int(CREATORS_API_TPS_LIMIT)))
+    batch_semaphore = AdaptiveSemaphore(initial=tps_concurrency, min_limit=1, max_limit=4, recovery_threshold=3)
 
     logger.info(
-        "PRICE MONITOR → TICK date=%s budget_remaining=%d batches_selected=%d total_asins=%d",
+        "PRICE MONITOR → TICK date=%s budget_remaining=%d batches_selected=%d total_asins=%d concurrency=%d",
         today_utc,
         remaining_budget,
         total_batches,
         len(valid_asins),
+        batch_semaphore.concurrency,
     )
 
-    for batch_index, batch_asins in enumerate(batches):
-        current_used = db.get_today_api_requests_count(today_utc)
-        if current_used >= usable_budget:
-            logger.warning(
-                "PRICE MONITOR → DAILY API BUDGET EXHAUSTED date=%s used=%d limit=%d",
-                today_utc,
-                current_used,
-                usable_budget,
-            )
-            break
+    async def _process_batch(batch_index: int, batch_asins: list[str]) -> None:
+        nonlocal successful_batches, failed_batches, count_429, consecutive_429
+        nonlocal retry_count, success_after_retry, permanently_failed, unique_asins_failed
+        nonlocal budget_used
 
-        logger.debug(
-            "PRICE MONITOR → BATCH START batch=%s/%s size=%s",
-            batch_index + 1,
-            total_batches,
-            len(batch_asins),
-        )
-
-        tb0 = time.monotonic()
-        batch_items: dict[str, Any] | None = None
-        batch_skipped_due_to_429 = False
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                items = await client.get_items(
-                    batch_asins,
-                    expanded_profile,
-                    db=db,
-                    profile="price_drop",
+        # Check budget before acquiring semaphore
+        async with _budget_lock:
+            if budget_used >= usable_budget:
+                logger.warning(
+                    "PRICE MONITOR → DAILY API BUDGET EXHAUSTED date=%s used=%d limit=%d",
+                    today_utc,
+                    budget_used,
+                    usable_budget,
                 )
-                tb1 = time.monotonic()
-                elapsed = tb1 - tb0
-                batch_durations.append(elapsed)
+                return
 
-                successful_batches += 1
-                consecutive_429 = 0
-                if attempt > 1:
-                    success_after_retry += 1
+        async with batch_semaphore:
+            # Re-check budget after acquiring semaphore (may have changed)
+            async with _budget_lock:
+                if budget_used >= usable_budget:
+                    return
+                budget_used += 1  # Reserve a slot
 
-                if hasattr(client, "record_monitoring_success"):
-                    res = client.record_monitoring_success()
-                    if inspect.isawaitable(res):
-                        await res
+            logger.debug(
+                "PRICE MONITOR → BATCH START batch=%s/%s size=%s concurrency=%s",
+                batch_index + 1,
+                total_batches,
+                len(batch_asins),
+                batch_semaphore.concurrency,
+            )
 
-                if attempt > 1:
-                    logger.debug(
-                        "PRICE MONITOR → BATCH SUCCESS AFTER RETRY batch=%s/%s attempt=%s duration=%.3fs",
-                        batch_index + 1,
-                        total_batches,
-                        attempt,
-                        elapsed,
+            tb0 = time.monotonic()
+            batch_items: dict[str, Any] | None = None
+            batch_skipped_due_to_429 = False
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    items = await client.get_items(
+                        batch_asins,
+                        expanded_profile,
+                        db=db,
+                        profile="price_drop",
                     )
-                else:
-                    logger.debug(
-                        "PRICE MONITOR → API BATCH END batch=%s/%s elapsed=%.3fs",
-                        batch_index + 1,
-                        total_batches,
-                        elapsed,
-                    )
-                batch_items = items or {}
-                break
+                    tb1 = time.monotonic()
+                    elapsed = tb1 - tb0
 
-            except CreatorsAPIError as exc:
-                if exc.status_code == 429:
-                    count_429 += 1
-                    retry_after = getattr(exc, "retry_after", None)
-                    cooldown_sec = retry_after if (retry_after is not None and retry_after > 0) else 1.8
+                    async with _metrics_lock:
+                        batch_durations.append(elapsed)
+                        successful_batches += 1
+                        consecutive_429 = 0
+                        if attempt > 1:
+                            success_after_retry += 1
 
-                    if attempt < max_attempts:
-                        retry_count += 1
-                        logger.warning(
-                            "PRICE MONITOR → API RATE LIMITED batch=%s/%s retry=%s cooldown=%.1fs",
+                    if hasattr(client, "record_monitoring_success"):
+                        res = client.record_monitoring_success()
+                        if inspect.isawaitable(res):
+                            await res
+
+                    await batch_semaphore.record_success()
+
+                    if attempt > 1:
+                        logger.debug(
+                            "PRICE MONITOR → BATCH SUCCESS AFTER RETRY batch=%s/%s attempt=%s duration=%.3fs",
                             batch_index + 1,
                             total_batches,
                             attempt,
-                            cooldown_sec,
+                            elapsed,
                         )
-                        await asyncio.sleep(cooldown_sec)
-                        continue
+                    else:
+                        logger.debug(
+                            "PRICE MONITOR → API BATCH END batch=%s/%s elapsed=%.3fs",
+                            batch_index + 1,
+                            total_batches,
+                            elapsed,
+                        )
+                    batch_items = items or {}
+                    break
+
+                except CreatorsAPIError as exc:
+                    if exc.status_code == 429:
+                        async with _metrics_lock:
+                            count_429 += 1
+                        retry_after = getattr(exc, "retry_after", None)
+                        cooldown_sec = retry_after if (retry_after is not None and retry_after > 0) else 1.8
+
+                        if attempt < max_attempts:
+                            async with _metrics_lock:
+                                retry_count += 1
+                            logger.warning(
+                                "PRICE MONITOR → API RATE LIMITED batch=%s/%s retry=%s cooldown=%.1fs",
+                                batch_index + 1,
+                                total_batches,
+                                attempt,
+                                cooldown_sec,
+                            )
+                            await asyncio.sleep(cooldown_sec)
+                            continue
+                        else:
+                            tb1 = time.monotonic()
+                            elapsed = tb1 - tb0
+                            async with _metrics_lock:
+                                batch_durations.append(elapsed)
+                                failed_batches += 1
+                            batch_skipped_due_to_429 = True
+
+                            logger.warning(
+                                "PRICE MONITOR → BATCH SKIPPED batch=%s/%s reason=HTTP_429",
+                                batch_index + 1,
+                                total_batches,
+                            )
+                            break
                     else:
                         tb1 = time.monotonic()
                         elapsed = tb1 - tb0
-                        batch_durations.append(elapsed)
-                        failed_batches += 1
-                        batch_skipped_due_to_429 = True
+                        async with _metrics_lock:
+                            batch_durations.append(elapsed)
+                            failed_batches += 1
+                            permanently_failed += 1
+                            unique_asins_failed += len(batch_asins)
 
-                        logger.warning(
-                            "PRICE MONITOR → BATCH SKIPPED batch=%s/%s reason=HTTP_429",
+                        logger.error(
+                            "PRICE MONITOR → BATCH FAILED batch=%s/%s exc=%s permanently_failed=True",
                             batch_index + 1,
                             total_batches,
+                            exc,
                         )
                         break
-                else:
+                except Exception as exc:
                     tb1 = time.monotonic()
                     elapsed = tb1 - tb0
-                    batch_durations.append(elapsed)
-                    failed_batches += 1
-                    permanently_failed += 1
-                    unique_asins_failed += len(batch_asins)
+                    async with _metrics_lock:
+                        batch_durations.append(elapsed)
+                        failed_batches += 1
+                        permanently_failed += 1
+                        unique_asins_failed += len(batch_asins)
 
                     logger.error(
-                        "PRICE MONITOR → BATCH FAILED batch=%s/%s exc=%s permanently_failed=True",
+                        "PRICE MONITOR → BATCH UNEXPECTED ERROR batch=%s/%s exc=%s permanently_failed=True",
                         batch_index + 1,
                         total_batches,
                         exc,
                     )
                     break
-            except Exception as exc:
-                tb1 = time.monotonic()
-                elapsed = tb1 - tb0
-                batch_durations.append(elapsed)
-                failed_batches += 1
-                permanently_failed += 1
-                unique_asins_failed += len(batch_asins)
 
-                logger.error(
-                    "PRICE MONITOR → BATCH UNEXPECTED ERROR batch=%s/%s exc=%s permanently_failed=True",
-                    batch_index + 1,
-                    total_batches,
-                    exc,
-                )
-                break
+            if batch_items is not None:
+                async with _fetched_items_lock:
+                    fetched_items.update(batch_items)
 
-        if batch_items is not None:
-            fetched_items.update(batch_items)
-
-        if batch_skipped_due_to_429:
-            consecutive_429 += 1
-            limiter = getattr(client, "_monitoring_limiter", None)
-            if limiter and hasattr(limiter, "record_429_backoff"):
-                res = limiter.record_429_backoff(retry_after)
-                if inspect.isawaitable(res):
-                    global_cooldown_sec = await res
+            if batch_skipped_due_to_429:
+                async with _metrics_lock:
+                    consecutive_429 += 1
+                # Reduce semaphore concurrency on 429
+                new_limit = await batch_semaphore.record_429()
+                # Let the rate limiter's _cooldown_until handle the backoff naturally
+                # instead of blocking all batches with an explicit sleep
+                limiter = getattr(client, "_monitoring_limiter", None)
+                if limiter and hasattr(limiter, "record_429_backoff"):
+                    res = limiter.record_429_backoff(retry_after)
+                    if inspect.isawaitable(res):
+                        global_cooldown_sec = await res
+                    else:
+                        global_cooldown_sec = res if isinstance(res, (int, float)) else 30.0
                 else:
-                    global_cooldown_sec = res if isinstance(res, (int, float)) else 30.0
-            else:
-                global_cooldown_sec = 30.0
+                    global_cooldown_sec = 30.0
 
-            logger.warning(
-                "PRICE MONITOR → GLOBAL RATE LIMIT BACKOFF consecutive_429=%s cooldown=%.0fs",
-                consecutive_429,
-                global_cooldown_sec,
-            )
-            await asyncio.sleep(global_cooldown_sec)
+                logger.warning(
+                    "PRICE MONITOR → RATE LIMIT BACKOFF consecutive_429=%s cooldown=%.0fs concurrency_reduced_to=%s",
+                    consecutive_429,
+                    global_cooldown_sec,
+                    new_limit,
+                )
+
+    # Launch all batches concurrently (gated by AdaptiveSemaphore)
+    batch_tasks = [
+        _process_batch(idx, batch_asins)
+        for idx, batch_asins in enumerate(batches)
+    ]
+    await asyncio.gather(*batch_tasks, return_exceptions=True)
 
     t_stage3_end = time.monotonic()
     t_api_requests = t_stage3_end - t_stage3_start
@@ -1340,7 +1391,8 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         "success_after_retry=%s\n"
         "permanently_failed=%s\n"
         "unique_asins_failed=%s\n"
-        "cooldown_remaining=%.2fs",
+        "cooldown_remaining=%.2fs\n"
+        "final_concurrency=%s",
         total_batches,
         successful_batches,
         failed_batches,
@@ -1350,14 +1402,19 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         permanently_failed,
         unique_asins_failed,
         cooldown_rem,
+        batch_semaphore.concurrency,
     )
 
-    # Stage 5: Bulk Latest History Read
+    # Stage 5: Bulk Latest History Read + Bulk Reference History Pre-fetch
     t_stage5_start = time.monotonic()
     bulk_history = db.get_bulk_latest_price_history(valid_asins)
+    # Pre-fetch all price history records for reference price calculation
+    bulk_ref_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    if hasattr(db, "get_bulk_price_history_for_reference"):
+        bulk_ref_history = db.get_bulk_price_history_for_reference(valid_asins, limit_per_pair=100)
     t_stage5_end = time.monotonic()
     t_db_reads = t_stage5_end - t_stage5_start
-    db_read_count = 1
+    db_read_count = 2 if bulk_ref_history else 1
 
     # Memory structures to collect DB updates for single transaction commit
     product_check_updates: list[tuple[float, int]] = []
@@ -1379,11 +1436,7 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
     missing_merchant_resale = 0
     api_failures = 0
 
-    t_parse_items = 0.0
     t_db_writes = 0.0
-    t_history_proc = 0.0
-    t_avail_updates = 0.0
-    t_drop_calc = 0.0
 
     skipped_disabled_products_count = 0
     for asin, product in asin_to_product.items():
@@ -1394,7 +1447,10 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
             continue
 
         item = fetched_items.get(asin)
-        eval_res = await evaluate_product_price_check(db, product, item, bulk_history, min_drop)
+        eval_res = await evaluate_product_price_check(
+            db, product, item, bulk_history, min_drop,
+            bulk_ref_history=bulk_ref_history,
+        )
 
         product_check_updates.extend(eval_res["product_check_updates"])
         seller_state_updates.extend(eval_res["seller_state_updates"])
@@ -1490,7 +1546,6 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
     t_total_end = time.monotonic()
     t_total = t_total_end - t_total_start
 
-    total_batches = (total + 9) // 10 if total > 0 else 0
     avg_api = (sum(batch_durations) / len(batch_durations)) if batch_durations else 0.0
     slowest_api = max(batch_durations) if batch_durations else 0.0
 
@@ -1505,14 +1560,11 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         "  - Total API Requests: %s\n"
         "  - Average Request Duration: %.3fs\n"
         "  - Slowest Request Duration: %.3fs\n"
-        "• Stage 4 — Product/offer parsing: %.3fs\n"
+        "  - Concurrency: %s\n"
         "• Stage 5 — Database reads: %.3fs (%s queries)\n"
         "• Stage 6 — Database writes: %.3fs (%s writes)\n"
-        "• Stage 7 — Price history processing: %.3fs\n"
-        "• Stage 8 — Availability state updates: %.3fs\n"
-        "• Stage 9 — Drop/restock calculations: %.3fs\n"
         "• Stage 10 — Telegram notifications: %.3fs\n"
-        "• Stage 11 — Total cycle time: %.3fs",
+        "• Total cycle time: %.3fs",
         t_fetch_products,
         t_build_batches,
         t_api_requests,
@@ -1521,14 +1573,11 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         len(batch_durations),
         avg_api,
         slowest_api,
-        t_parse_items,
+        batch_semaphore.concurrency,
         t_db_reads,
         db_read_count,
         t_db_writes,
         db_write_count,
-        t_history_proc,
-        t_avail_updates,
-        t_drop_calc,
         t_telegram_notifs,
         t_total,
     )

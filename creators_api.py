@@ -516,7 +516,7 @@ class CreatorsRateLimiter:
 
             now = time.monotonic()
             base_time = max(now, self._cooldown_until)
-            if self._last_request < base_time:
+            if self._last_request + self._min_interval <= base_time:
                 target_time = base_time
             else:
                 target_time = self._last_request + self._min_interval
@@ -1126,16 +1126,30 @@ class CreatorsClient:
         missing: list[str] = []
 
         if db is not None and not bypass_cache:
-            for asin in normalized_asins:
-                cached = db.get_creators_cache(asin, profile)
-                if cached:
-                    logger.debug("CREATORS CACHE HIT asin=%s profile=%s", asin, profile)
-                    item = NormalizedItem.from_dict(cached)
-                    if item.title != "Not found":
-                        results[asin] = item
-                        continue
-                logger.debug("CREATORS CACHE MISS asin=%s profile=%s", asin, profile)
-                missing.append(asin)
+            # Bulk cache lookup: single query instead of N individual queries
+            if hasattr(db, "get_creators_cache_bulk"):
+                cached_map = db.get_creators_cache_bulk(normalized_asins, profile)
+                for asin in normalized_asins:
+                    cached = cached_map.get(asin)
+                    if cached:
+                        logger.debug("CREATORS CACHE HIT asin=%s profile=%s", asin, profile)
+                        item = NormalizedItem.from_dict(cached)
+                        if item.title != "Not found":
+                            results[asin] = item
+                            continue
+                    logger.debug("CREATORS CACHE MISS asin=%s profile=%s", asin, profile)
+                    missing.append(asin)
+            else:
+                for asin in normalized_asins:
+                    cached = db.get_creators_cache(asin, profile)
+                    if cached:
+                        logger.debug("CREATORS CACHE HIT asin=%s profile=%s", asin, profile)
+                        item = NormalizedItem.from_dict(cached)
+                        if item.title != "Not found":
+                            results[asin] = item
+                            continue
+                    logger.debug("CREATORS CACHE MISS asin=%s profile=%s", asin, profile)
+                    missing.append(asin)
         else:
             if bypass_cache:
                 logger.debug("CREATORS CACHE BYPASS asins=%s profile=%s", normalized_asins, profile)

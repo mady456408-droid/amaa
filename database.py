@@ -1358,6 +1358,43 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_bulk_price_history_for_reference(
+        self, asins: list[str], limit_per_pair: int = 100
+    ) -> dict[tuple[str, str], list[dict[str, Any]]]:
+        """Fetch price history records for multiple ASINs × both seller types in bulk.
+
+        Returns map: (asin_upper, seller_type) -> list of history dicts (newest first).
+        Uses window function to limit results per (asin, seller_type) pair efficiently.
+        """
+        if not asins:
+            return {}
+        asins_upper = [a.upper() for a in asins]
+        out: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        with self._connect() as conn:
+            for i in range(0, len(asins_upper), 500):
+                chunk = asins_upper[i : i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                query = f"""
+                    SELECT * FROM (
+                        SELECT *,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY asin, seller_type
+                                ORDER BY recorded_at DESC, id DESC
+                            ) AS rn
+                        FROM price_history
+                        WHERE asin IN ({placeholders})
+                    ) sub
+                    WHERE rn <= ?
+                    ORDER BY asin, seller_type, recorded_at DESC, id DESC
+                """
+                rows = conn.execute(query, (*chunk, limit_per_pair)).fetchall()
+                for r in rows:
+                    d = dict(r)
+                    d.pop("rn", None)
+                    key = (d["asin"].upper(), d["seller_type"])
+                    out.setdefault(key, []).append(d)
+        return out
+
     def get_price_history_stats(
         self,
         asin: str,
@@ -1669,6 +1706,34 @@ class Database:
             return json.loads(row["payload_json"])
         except json.JSONDecodeError:
             return None
+
+    def get_creators_cache_bulk(self, asins: list[str], profile: str) -> dict[str, dict[str, Any]]:
+        """Fetch cached Creators API payloads for multiple ASINs in a single query.
+
+        Returns map: ASIN (upper) -> parsed payload dict. Only non-expired entries included.
+        """
+        if not asins:
+            return {}
+        now = datetime.now(timezone.utc).isoformat()
+        asins_upper = [a.upper() for a in asins]
+        out: dict[str, dict[str, Any]] = {}
+        with self._connect() as conn:
+            for i in range(0, len(asins_upper), 500):
+                chunk = asins_upper[i : i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT asin, payload_json FROM creators_cache
+                    WHERE asin IN ({placeholders}) AND profile = ? AND expires_at > ?
+                    """,
+                    (*chunk, profile, now),
+                ).fetchall()
+                for r in rows:
+                    try:
+                        out[r["asin"].upper()] = json.loads(r["payload_json"])
+                    except json.JSONDecodeError:
+                        pass
+        return out
 
     def set_creators_cache(
         self,
