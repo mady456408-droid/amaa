@@ -950,14 +950,24 @@ class Database:
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE published_products
-                SET last_checked_at = ?, last_price_check = ?
-                WHERE id = ?
-                """,
-                (now, last_price_check, published_id),
-            )
+            if last_price_check is not None:
+                conn.execute(
+                    """
+                    UPDATE published_products
+                    SET last_checked_at = ?, last_price_check = ?
+                    WHERE id = ?
+                    """,
+                    (now, last_price_check, published_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE published_products
+                    SET last_checked_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, published_id),
+                )
             conn.commit()
 
     def update_published_product_after_republish(
@@ -1245,10 +1255,16 @@ class Database:
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             for curr_final, product_id in product_check_updates:
-                conn.execute(
-                    "UPDATE published_products SET last_price_check = ?, last_checked_at = ? WHERE id = ?",
-                    (curr_final, now_iso, product_id),
-                )
+                if curr_final is not None:
+                    conn.execute(
+                        "UPDATE published_products SET last_price_check = ?, last_checked_at = ? WHERE id = ?",
+                        (curr_final, now_iso, product_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE published_products SET last_checked_at = ? WHERE id = ?",
+                        (now_iso, product_id),
+                    )
 
             for item_update in seller_state_updates:
                 reference_price = None

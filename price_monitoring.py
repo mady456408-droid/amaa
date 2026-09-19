@@ -354,6 +354,9 @@ async def evaluate_product_price_check(
             "counts": counts,
         }
 
+    product_stype = product.get("seller_type") or "NEW_AMAZON"
+    recorded_check_price: float | None = None
+
     seller_configs = [
         ("NEW_AMAZON", NEW_AMAZON_SELLER_ID),
         ("AMAZON_RESALE", AMAZON_RESALE_SELLER_ID),
@@ -490,7 +493,8 @@ async def evaluate_product_price_check(
             continue
 
         curr_final = price_val if price_val else 0.0
-        product_check_updates.append((curr_final, product["id"]))
+        if seller_type == product_stype:
+            recorded_check_price = curr_final
 
         # Calculate robust reference price for this (asin, seller_type)
         if bulk_ref_history is not None:
@@ -851,6 +855,8 @@ async def evaluate_product_price_check(
                     "message_text": msg_text,
                 }
             )
+
+    product_check_updates.append((recorded_check_price, product["id"]))
 
     return {
         "asin": asin,
@@ -1476,6 +1482,10 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
         unknown_resale += c["unknown_resale"]
         ignored_small_changes += c["ignored_small_changes"]
         api_failures += c["api_failures"]
+
+    for _, p in invalid_asins:
+        if p.get("id"):
+            product_check_updates.append((None, p["id"]))
 
     # Stage 6: Atomic Bulk Database Updates
     t_stage6_start = time.monotonic()
