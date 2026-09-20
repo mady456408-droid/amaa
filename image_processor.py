@@ -1932,23 +1932,23 @@ def _draw_horizontal_composite_card(
     if product.rating and product.review_count:
         rating_text = f"{product.rating} ({product.review_count})"
         disp_rating = shape_text(rating_text)
-        rating_font = _load_ui_font(13, disp_rating, bold=False)
+        rating_font = _load_ui_font(15, disp_rating, bold=False)
         r_bbox = draw.textbbox((0, 0), disp_rating, font=rating_font)
         r_w = r_bbox[2] - r_bbox[0]
 
-        stars_w = 5 * (14 + 3)
+        stars_w = 5 * (16 + 3)
         total_rating_w = r_w + 6 + stars_w
         rating_x = inner_x + inner_w - total_rating_w
 
         draw.text((rating_x + stars_w + 6, cursor_y), disp_rating, font=rating_font, fill=(86, 89, 89, 255))
-        _draw_star_rating(draw, rating_x, cursor_y + 1, num_stars=5, star_size=14)
+        _draw_star_rating(draw, rating_x, cursor_y + 1, num_stars=5, star_size=16)
 
     cursor_y = rating_start_y + 22
 
     # Social Proof
     if product.bought_past_month:
         disp_social = shape_text(product.bought_past_month)
-        social_font = _load_ui_font(12, disp_social, bold=False)
+        social_font = _load_ui_font(14, disp_social, bold=False)
         s_bbox = draw.textbbox((0, 0), disp_social, font=social_font)
         s_w = s_bbox[2] - s_bbox[0]
         draw.text((inner_x + inner_w - s_w, cursor_y), disp_social, font=social_font, fill=(86, 89, 89, 255))
@@ -1985,9 +1985,9 @@ def _draw_horizontal_composite_card(
     prime_start_y = price_bottom + 12
 
     # 7. Prime & Delivery Badges - Right Aligned
-    prime_reserved_h = 22
+    prime_reserved_h = 24  # Increased slightly for better padding with 14px font
     if product.prime_exclusive:
-        cyan_badge_w = 42
+        cyan_badge_w = 46  # Increased from 42 to fit larger font
         cyan_badge_h = prime_reserved_h
         badge_x = inner_x + inner_w - cyan_badge_w
 
@@ -1996,21 +1996,21 @@ def _draw_horizontal_composite_card(
             radius=4,
             fill=_COMPOSITE_PRIME_COLOR,
         )
-        gadan_font = _load_ui_font(13, "غداً", bold=True)
+        gadan_font = _load_ui_font(14, "غداً", bold=True)
         disp_gadan = shape_text("غداً")
         gb_box = draw.textbbox((0, 0), disp_gadan, font=gadan_font)
         g_w = gb_box[2] - gb_box[0]
         draw.text((badge_x + (cyan_badge_w - g_w) // 2, prime_start_y + 2), disp_gadan, font=gadan_font, fill=(255, 255, 255, 255))
 
         prime_w = 72
-        _draw_prime_inline(draw, badge_x - prime_w, prime_start_y + 3)
+        _draw_prime_inline(draw, badge_x - prime_w, prime_start_y + 4)
 
     # Regardless of Prime's presence, advance by the reserved slot to keep delivery aligned
     prime_bottom = prime_start_y + prime_reserved_h
     deliv_start_y = prime_bottom + 10
 
     # Delivery info line
-    deliv_font = _load_ui_font(13, "توصيل مجاني غداً، 18 أغسطس", bold=False)
+    deliv_font = _load_ui_font(15, "توصيل مجاني غداً، 18 أغسطس", bold=False)
     deliv_text = "توصيل مجاني غداً، 18 أغسطس"
     disp_deliv = shape_text(deliv_text)
     d_bbox = draw.textbbox((0, 0), disp_deliv, font=deliv_font)
@@ -2024,7 +2024,7 @@ def _draw_horizontal_composite_card(
     urgency_start_y = btn_y - 28
     if product.urgency_text:
         disp_urg = shape_text(product.urgency_text)
-        urg_font = _load_ui_font(13, disp_urg, bold=False)
+        urg_font = _load_ui_font(15, disp_urg, bold=False)
         u_bbox = draw.textbbox((0, 0), disp_urg, font=urg_font)
         u_w = u_bbox[2] - u_bbox[0]
         draw.text((inner_x + inner_w - u_w, urgency_start_y), disp_urg, font=urg_font, fill=(204, 12, 57, 255))
