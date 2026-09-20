@@ -5,7 +5,7 @@ from typing import NamedTuple
 
 import arabic_reshaper
 from bidi.algorithm import get_display
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from coupon_price import parse_price_number
 from PIL import features
@@ -44,21 +44,56 @@ _PRICE_CARD_RADIUS = 26
 _PRICE_CARD_INNER_RESERVE = 90
 _PRICE_CARD_WIDTH_BOOST = 1.12
 _PRICE_NUM_CURRENCY_GAP = 11
-_DISCOUNT_BADGE_FONT = int(48 * _FONT_SCALE)
-_DISCOUNT_BADGE_PAD_X = 30
-_DISCOUNT_BADGE_PAD_Y = 16
-_DISCOUNT_BADGE_RADIUS = 20
-_AMAZON_YELLOW = (255, 216, 20, 255)
-_AMAZON_YELLOW_BORDER = (235, 195, 10, 255)
-_GRAY_TEXT = (86, 89, 89, 255)
-_LABEL_GRAY = (86, 89, 89, 255)
-_BLACK_TEXT = (15, 17, 17, 255)
+# -- Discount badge: enlarged for premium prominence --
+_DISCOUNT_BADGE_FONT = int(58 * _FONT_SCALE)
+_DISCOUNT_BADGE_PAD_X = 36
+_DISCOUNT_BADGE_PAD_Y = 20
+_DISCOUNT_BADGE_RADIUS = 24
+
+# ─── Premium Black + Gold Theme ────────────────────────────────────
+# Canvas background: warm off-white instead of pure white
+_CANVAS_BG = (252, 251, 249, 255)
+# Dark info panel gradient
+_PANEL_DARK_TOP = (20, 22, 28)
+_PANEL_DARK_BOTTOM = (32, 35, 42)
+_PANEL_CORNER_RADIUS = 22
+# Gold price card
+_GOLD_TOP = (255, 220, 60, 255)
+_GOLD_BOTTOM = (235, 185, 15, 255)
+_GOLD_BORDER = (210, 170, 10, 255)
+_GOLD_HIGHLIGHT = (255, 240, 140, 80)   # subtle inner highlight
+_PRICE_SHADOW_ALPHA = 45                # stronger drop shadow
+# Title on dark panel: white
+_TITLE_ON_DARK = (255, 255, 255, 255)
+# Old price on dark panel: warm light gray
+_OLD_PRICE_ON_DARK = (195, 195, 200, 255)
+_OLD_PRICE_STRIKE_COLOR = (220, 60, 60, 255)   # red strikethrough
+# Price card internal text
+_PRICE_LABEL_ON_GOLD = (60, 50, 5, 255)        # dark brown on gold
+_PRICE_NUM_ON_GOLD = (15, 15, 15, 255)          # near-black on gold
+# Discount badge: keep red but with glow
 _DISCOUNT_RED = (204, 12, 57, 255)
+_DISCOUNT_GLOW = (204, 12, 57, 50)              # outer glow
+# Prime badge
 _PRIME_BLUE_LIGHT = (0, 168, 225, 255)
 _PRIME_BADGE_FONT = int(32 * _FONT_SCALE)
 _PRIME_BADGE_PAD_X = 22
 _PRIME_BADGE_PAD_Y = 10
 _PRIME_BADGE_RADIUS = 16
+# Product image area
+_PRODUCT_SHADOW_BLUR = 10
+_PRODUCT_SHADOW_ALPHA = 30
+_PRODUCT_BG_EDGE = (245, 245, 248, 255)
+# Seller badge on dark panel
+_SELLER_AMAZON_FILL = (30, 50, 75, 255)
+_SELLER_AMAZON_TEXT = (160, 210, 255, 255)
+_SELLER_AMAZON_BORDER = (60, 100, 150, 255)
+_SELLER_RESALE_FILL = (30, 55, 35, 255)
+_SELLER_RESALE_TEXT = (140, 220, 150, 255)
+_SELLER_RESALE_COND = (100, 190, 120, 255)
+_SELLER_RESALE_BORDER = (60, 130, 70, 255)
+# ────────────────────────────────────────────────────────────────────
+
 _WHITE_THRESHOLD = 248
 _TRANSPARENT_ALPHA = 12
 _CORNER_BADGE_MARGIN = 32
@@ -305,6 +340,67 @@ def _compute_product_position(
     return rel_x, rel_y
 
 
+def _draw_dark_info_panel_bg(
+    canvas: Image.Image,
+    left_w: int,
+    slot_height: int,
+) -> None:
+    """Draw a dark vertical-gradient rounded rectangle as the info panel backdrop."""
+    margin = 8
+    x1, y1 = margin, margin
+    x2, y2 = left_w - margin // 2, slot_height - margin
+    height = y2 - y1
+
+    # Build vertical gradient line-by-line
+    panel = Image.new("RGBA", (x2 - x1, height), (0, 0, 0, 0))
+    draw_p = ImageDraw.Draw(panel)
+    for row in range(height):
+        t = row / max(1, height - 1)
+        r = int(_PANEL_DARK_TOP[0] + (_PANEL_DARK_BOTTOM[0] - _PANEL_DARK_TOP[0]) * t)
+        g = int(_PANEL_DARK_TOP[1] + (_PANEL_DARK_BOTTOM[1] - _PANEL_DARK_TOP[1]) * t)
+        b = int(_PANEL_DARK_TOP[2] + (_PANEL_DARK_BOTTOM[2] - _PANEL_DARK_TOP[2]) * t)
+        draw_p.line([(0, row), (x2 - x1, row)], fill=(r, g, b, 255))
+
+    # Apply rounded-corner mask
+    mask = Image.new("L", panel.size, 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.rounded_rectangle(
+        (0, 0, panel.width - 1, panel.height - 1),
+        radius=_PANEL_CORNER_RADIUS,
+        fill=255,
+    )
+    panel.putalpha(mask)
+    canvas.paste(panel, (x1, y1), panel)
+
+
+def _paste_with_shadow(
+    canvas: Image.Image,
+    overlay: Image.Image,
+    position: tuple[int, int],
+) -> None:
+    """Paste an image onto canvas with a subtle drop shadow underneath."""
+    ox, oy = position
+    w, h = overlay.size
+
+    # Create shadow from the overlay alpha channel
+    shadow_offset = 4
+    try:
+        shadow_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        # Solid dark fill shaped by the overlay
+        shadow_fill = Image.new("RGBA", (w, h), (0, 0, 0, _PRODUCT_SHADOW_ALPHA))
+        shadow_layer.paste(shadow_fill, (ox + shadow_offset, oy + shadow_offset), overlay)
+        shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=_PRODUCT_SHADOW_BLUR))
+        canvas.paste(Image.alpha_composite(
+            Image.new("RGBA", canvas.size, (0, 0, 0, 0)),
+            shadow_layer,
+        ), (0, 0), shadow_layer)
+    except Exception:
+        pass  # Graceful fallback: skip shadow if anything fails
+
+    # Paste the actual product image
+    canvas.paste(overlay, position)
+
+
 def apply_frame_creators_product(
     image_path: str,
     output_path: str,
@@ -328,7 +424,8 @@ def apply_frame_creators_product(
     frame = Image.open(frame_path).convert("RGBA")
     geo = get_frame_geometry(frame)
 
-    canvas = Image.new("RGBA", (geo.slot_width, geo.slot_height), (255, 255, 255, 255))
+    # Warm off-white canvas instead of pure white
+    canvas = Image.new("RGBA", (geo.slot_width, geo.slot_height), _CANVAS_BG)
 
     probe = ImageDraw.Draw(canvas)
     left_w = _compute_left_panel_width(
@@ -342,6 +439,10 @@ def apply_frame_creators_product(
     inner_w = right_w - 2 * _IMG_PANEL_PAD
     inner_h = geo.slot_height - 2 * _IMG_PANEL_PAD
 
+    # ── Dark gradient info panel background ──
+    _draw_dark_info_panel_bg(canvas, left_w, geo.slot_height)
+
+    # ── Product image with shadow ──
     image = _neutralize_transparent_rgb(_trim_product_borders(Image.open(image_path)))
     trimmed_w, trimmed_h = image.size
     aspect = trimmed_w / trimmed_h if trimmed_h else 1.0
@@ -352,7 +453,9 @@ def apply_frame_creators_product(
 
     rel_x, rel_y = _compute_product_position(inner_w, inner_h, scaled_w, scaled_h, aspect)
     product_area = _composite_on_white((inner_w, inner_h), image_scaled, (rel_x, rel_y))
-    canvas.paste(product_area, (left_w + _IMG_PANEL_PAD, _IMG_PANEL_PAD))
+
+    # Subtle product drop shadow for depth
+    _paste_with_shadow(canvas, product_area, (left_w + _IMG_PANEL_PAD, _IMG_PANEL_PAD))
 
     panel_width = left_w - 2 * _INFO_PAD
     layout_scale = _panel_content_scale(
@@ -984,10 +1087,10 @@ def draw_seller_badge(
     if is_resale:
         header_text = "Amazon Resale"
         cond_text = _format_resale_condition_display(seller_condition)
-        badge_fill = (240, 248, 242, 255)
-        text_color = (20, 75, 30, 255)
-        cond_color = (35, 115, 45, 255)
-        border_color = (140, 195, 145, 255)
+        badge_fill = _SELLER_RESALE_FILL
+        text_color = _SELLER_RESALE_TEXT
+        cond_color = _SELLER_RESALE_COND
+        border_color = _SELLER_RESALE_BORDER
         font_size = _scaled(int(_TITLE_FONT_MAX * 0.51), scale)
         pad_x = _scaled(26, scale)
         pad_y = _scaled(12, scale)
@@ -996,10 +1099,10 @@ def draw_seller_badge(
     else:
         header_text = "البائع: Amazon.eg"
         cond_text = None
-        badge_fill = (242, 246, 252, 255)
-        text_color = (0, 69, 124, 255)
+        badge_fill = _SELLER_AMAZON_FILL
+        text_color = _SELLER_AMAZON_TEXT
         cond_color = None
-        border_color = (180, 205, 235, 255)
+        border_color = _SELLER_AMAZON_BORDER
         font_size = _scaled(int(_TITLE_FONT_MAX * 0.44), scale)
         pad_x = _scaled(22, scale)
         pad_y = _scaled(10, scale)
@@ -1245,7 +1348,7 @@ def draw_title(
             current_y,
             line,
             title_font,
-            _BLACK_TEXT,
+            _TITLE_ON_DARK,
             panel_x,
             panel_width,
             _contains_arabic(line),
@@ -1304,9 +1407,9 @@ def draw_old_price(
         number_x = label_x + label_w + space_w
         currency_x = number_x + number_w + space_w
 
-    _draw_text(draw, (label_x, y), label, font, _GRAY_TEXT)
-    _draw_text(draw, (number_x, y), number_text, font, _GRAY_TEXT)
-    _draw_text(draw, (currency_x, y), currency_text, font, _GRAY_TEXT)
+    _draw_text(draw, (label_x, y), label, font, _OLD_PRICE_ON_DARK)
+    _draw_text(draw, (number_x, y), number_text, font, _OLD_PRICE_ON_DARK)
+    _draw_text(draw, (currency_x, y), currency_text, font, _OLD_PRICE_ON_DARK)
 
     # Exact strikethrough alignment through vertical center of digits
     num_disp = shape_text(number_text)
@@ -1324,7 +1427,7 @@ def draw_old_price(
             number_x + number_w + strike_pad,
             strike_y,
         ),
-        fill=_GRAY_TEXT,
+        fill=_OLD_PRICE_STRIKE_COLOR,
         width=max(2, _scaled(_OLD_PRICE_STRIKE_WIDTH, scale)),
     )
 
@@ -1351,22 +1454,50 @@ def draw_price_card(
     box_y1 = y
     box_y2 = box_y1 + layout.box_h
 
-    # Soft ambient drop shadow for subtle depth
-    shadow_y = max(2, _scaled(4, scale))
+    # Stronger premium drop shadow
+    shadow_y = max(3, _scaled(6, scale))
     draw.rounded_rectangle(
-        (box_x1 + 1, box_y1 + shadow_y, box_x2 + 1, box_y2 + shadow_y),
+        (box_x1 + 2, box_y1 + shadow_y, box_x2 + 2, box_y2 + shadow_y),
         radius=layout.radius,
-        fill=(0, 0, 0, 18),
+        fill=(0, 0, 0, _PRICE_SHADOW_ALPHA),
     )
 
-    # Main yellow card with crisp border
+    # Gold gradient card — draw as a filled base then overlay gradient
     draw.rounded_rectangle(
         (box_x1, box_y1, box_x2, box_y2),
         radius=layout.radius,
-        fill=_AMAZON_YELLOW,
-        outline=_AMAZON_YELLOW_BORDER,
-        width=max(1, _scaled(1, scale)),
+        fill=_GOLD_TOP,
+        outline=_GOLD_BORDER,
+        width=max(1, _scaled(2, scale)),
     )
+    # Overlay a subtle bottom-to-darker gradient inside the card
+    card_h = box_y2 - box_y1
+    for row_offset in range(card_h):
+        t = row_offset / max(1, card_h - 1)
+        row_y = box_y1 + row_offset
+        # Blend from GOLD_TOP to GOLD_BOTTOM
+        r = int(_GOLD_TOP[0] + (_GOLD_BOTTOM[0] - _GOLD_TOP[0]) * t)
+        g = int(_GOLD_TOP[1] + (_GOLD_BOTTOM[1] - _GOLD_TOP[1]) * t)
+        b = int(_GOLD_TOP[2] + (_GOLD_BOTTOM[2] - _GOLD_TOP[2]) * t)
+        draw.line(
+            [(box_x1 + layout.radius, row_y), (box_x2 - layout.radius, row_y)],
+            fill=(r, g, b, 255),
+        )
+    # Re-draw outline after gradient fill to keep crisp edges
+    draw.rounded_rectangle(
+        (box_x1, box_y1, box_x2, box_y2),
+        radius=layout.radius,
+        fill=None,
+        outline=_GOLD_BORDER,
+        width=max(1, _scaled(2, scale)),
+    )
+
+    # Subtle highlight line at top edge
+    highlight_y = box_y1 + max(2, _scaled(3, scale))
+    hl_x1 = box_x1 + layout.radius + 4
+    hl_x2 = box_x2 - layout.radius - 4
+    if hl_x2 > hl_x1:
+        draw.line([(hl_x1, highlight_y), (hl_x2, highlight_y)], fill=_GOLD_HIGHLIGHT, width=2)
 
     inner_h = layout.box_h - layout.pad_y * 2
     content_offset = max(0, (inner_h - layout.content_h) // 2)
@@ -1379,7 +1510,7 @@ def draw_price_card(
         (label_x, base_y + layout.label_draw_y),
         _PRICE_LABEL,
         layout.label_font,
-        _LABEL_GRAY,
+        _PRICE_LABEL_ON_GOLD,
     )
 
     num_x = inner_x - layout.num_w if rtl else inner_x
@@ -1388,7 +1519,7 @@ def draw_price_card(
         (num_x, base_y + layout.num_draw_y),
         layout.number,
         layout.num_font,
-        _BLACK_TEXT,
+        _PRICE_NUM_ON_GOLD,
     )
 
     curr_x = inner_x - layout.curr_w if rtl else inner_x
@@ -1397,7 +1528,7 @@ def draw_price_card(
         (curr_x, base_y + layout.curr_draw_y),
         layout.currency,
         layout.curr_font,
-        _BLACK_TEXT,
+        _PRICE_NUM_ON_GOLD,
     )
 
     return (box_y2, (box_x1, box_y1, layout.box_w, layout.box_h))
@@ -1421,9 +1552,29 @@ def draw_discount_badge(
     pad_x = _scaled(_DISCOUNT_BADGE_PAD_X, scale)
     pad_y = _scaled(_DISCOUNT_BADGE_PAD_Y, scale)
     box_w = text_w + pad_x * 2
+    box_h = text_h + pad_y * 2
     badge_x = canvas.width - _CORNER_BADGE_MARGIN
     x1 = badge_x - box_w
     y1 = _CORNER_BADGE_MARGIN
+
+    # Outer glow effect for premium visual punch
+    glow_expand = _scaled(6, scale)
+    try:
+        glow_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow_layer)
+        glow_draw.rounded_rectangle(
+            (x1 - glow_expand, y1 - glow_expand,
+             x1 + box_w + glow_expand, y1 + box_h + glow_expand),
+            radius=_scaled(_DISCOUNT_BADGE_RADIUS, scale) + glow_expand,
+            fill=_DISCOUNT_GLOW,
+        )
+        glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(radius=_scaled(8, scale)))
+        canvas.paste(Image.alpha_composite(
+            Image.new("RGBA", canvas.size, (0, 0, 0, 0)), glow_layer,
+        ), (0, 0), glow_layer)
+    except Exception:
+        pass  # Graceful fallback
+
     _draw_pill_badge(
         canvas,
         discount_text,
