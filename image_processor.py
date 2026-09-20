@@ -18,9 +18,9 @@ _FONT_SCALE = 1.15
 _FRAME_PADDING = 40
 _LEFT_PANEL_RATIO_MIN = 0.36
 _LEFT_PANEL_RATIO_MAX = 0.40
-_OLD_PRICE_CARD_GAP = 24
-_TITLE_OLD_PRICE_GAP = 28
-_PRICE_SELLER_GAP = 14
+_OLD_PRICE_CARD_GAP = 18
+_TITLE_OLD_PRICE_GAP = 24
+_PRICE_SELLER_GAP = 16
 _SELLER_LINE_GAP = 6
 _IMG_PANEL_PAD = 16
 _IMG_FILL_RATIO = 0.966
@@ -31,13 +31,13 @@ _TITLE_MAX_LINES = 3
 _TITLE_AFTER_GAP = 20
 _TITLE_FONT_MAX = int(72 * _FONT_SCALE)
 _TITLE_FONT_MIN = int(40 * _FONT_SCALE)
-_TITLE_LINE_GAP = int(14 * _FONT_SCALE)
+_TITLE_LINE_GAP = int(24 * _FONT_SCALE)
 _OLD_PRICE_FONT = int(68 * _FONT_SCALE)
 _OLD_PRICE_STRIKE_WIDTH = int(6 * _FONT_SCALE)
-_PRICE_LABEL_FONT = int(32 * _FONT_SCALE)
-_PRICE_CURRENCY_FONT = int(42 * _FONT_SCALE)
-_PRICE_NUM_MAX = int(110 * _FONT_SCALE)
-_PRICE_NUM_MIN = int(68 * _FONT_SCALE)
+_PRICE_LABEL_FONT = int(26 * _FONT_SCALE)
+_PRICE_CURRENCY_FONT = int(34 * _FONT_SCALE)
+_PRICE_NUM_MAX = int(135 * _FONT_SCALE)
+_PRICE_NUM_MIN = int(80 * _FONT_SCALE)
 _PRICE_CARD_PAD_X = 48
 _PRICE_CARD_PAD_Y = 32
 _PRICE_CARD_RADIUS = 26
@@ -45,10 +45,10 @@ _PRICE_CARD_INNER_RESERVE = 90
 _PRICE_CARD_WIDTH_BOOST = 1.12
 _PRICE_NUM_CURRENCY_GAP = 11
 # -- Discount badge: enlarged for premium prominence --
-_DISCOUNT_BADGE_FONT = int(58 * _FONT_SCALE)
-_DISCOUNT_BADGE_PAD_X = 36
-_DISCOUNT_BADGE_PAD_Y = 20
-_DISCOUNT_BADGE_RADIUS = 24
+_DISCOUNT_BADGE_FONT = int(68 * _FONT_SCALE)
+_DISCOUNT_BADGE_PAD_X = 44
+_DISCOUNT_BADGE_PAD_Y = 24
+_DISCOUNT_BADGE_RADIUS = 28
 
 # ─── Premium Black + Gold Theme ────────────────────────────────────
 # Canvas background: warm off-white instead of pure white
@@ -58,24 +58,24 @@ _PANEL_DARK_TOP = (20, 22, 28)
 _PANEL_DARK_BOTTOM = (32, 35, 42)
 _PANEL_CORNER_RADIUS = 22
 # Gold price card
-_GOLD_TOP = (255, 220, 60, 255)
-_GOLD_BOTTOM = (235, 185, 15, 255)
-_GOLD_BORDER = (210, 170, 10, 255)
-_GOLD_HIGHLIGHT = (255, 240, 140, 80)   # subtle inner highlight
-_PRICE_SHADOW_ALPHA = 45                # stronger drop shadow
+_GOLD_TOP = (255, 215, 0, 255)
+_GOLD_BOTTOM = (235, 175, 0, 255)
+_GOLD_BORDER = (215, 155, 0, 255)
+_GOLD_HIGHLIGHT = (255, 240, 140, 60)   # subtle inner highlight
+_PRICE_SHADOW_ALPHA = 20                # much more subtle drop shadow
 # Title on dark panel: white
 _TITLE_ON_DARK = (255, 255, 255, 255)
 # Old price on dark panel: warm light gray
 _OLD_PRICE_ON_DARK = (195, 195, 200, 255)
 _OLD_PRICE_STRIKE_COLOR = (220, 60, 60, 255)   # red strikethrough
 # Price card internal text
-_PRICE_LABEL_ON_GOLD = (60, 50, 5, 255)        # dark brown on gold
+_PRICE_LABEL_ON_GOLD = (30, 25, 5, 255)        # clean dark on gold
 _PRICE_NUM_ON_GOLD = (15, 15, 15, 255)          # near-black on gold
-# Discount badge: keep red but with glow
+# Discount badge: keep red but with glow (removed glow in actual code)
 _DISCOUNT_RED = (204, 12, 57, 255)
 _DISCOUNT_GLOW = (204, 12, 57, 50)              # outer glow
 # Prime badge
-_PRIME_BLUE_LIGHT = (0, 168, 225, 255)
+_PRIME_BLUE_LIGHT = (45, 48, 55, 255)
 _PRIME_BADGE_FONT = int(32 * _FONT_SCALE)
 _PRIME_BADGE_PAD_X = 22
 _PRIME_BADGE_PAD_Y = 10
@@ -85,13 +85,13 @@ _PRODUCT_SHADOW_BLUR = 10
 _PRODUCT_SHADOW_ALPHA = 30
 _PRODUCT_BG_EDGE = (245, 245, 248, 255)
 # Seller badge on dark panel
-_SELLER_AMAZON_FILL = (30, 50, 75, 255)
-_SELLER_AMAZON_TEXT = (160, 210, 255, 255)
-_SELLER_AMAZON_BORDER = (60, 100, 150, 255)
-_SELLER_RESALE_FILL = (30, 55, 35, 255)
-_SELLER_RESALE_TEXT = (140, 220, 150, 255)
-_SELLER_RESALE_COND = (100, 190, 120, 255)
-_SELLER_RESALE_BORDER = (60, 130, 70, 255)
+_SELLER_AMAZON_FILL = (15, 17, 20, 255)
+_SELLER_AMAZON_TEXT = (230, 230, 235, 255)
+_SELLER_AMAZON_BORDER = (60, 65, 75, 255)
+_SELLER_RESALE_FILL = (15, 17, 20, 255)
+_SELLER_RESALE_TEXT = (230, 230, 235, 255)
+_SELLER_RESALE_COND = (180, 185, 195, 255)
+_SELLER_RESALE_BORDER = (60, 65, 75, 255)
 # ────────────────────────────────────────────────────────────────────
 
 _WHITE_THRESHOLD = 248
@@ -108,6 +108,16 @@ _COMPOSITE_CARD_PAD = 12
 _COMPOSITE_IMG_TEXT_GAP = 10
 _COMPOSITE_TITLE_PRICE_GAP = 8
 _COMPOSITE_TITLE_FONT_MAX = int(30 * _FONT_SCALE)
+
+# ─── Composite Card Constants ──────────────────────────────────────
+_COMPOSITE_RATING_PRICE_GAP = 16
+_COMPOSITE_PRICE_PRIME_GAP = 16  # Used as a margin below the actual price height
+_COMPOSITE_PRIME_DELIVERY_GAP = 12 # margin below prime row
+_COMPOSITE_DISCOUNT_BADGE_FONT = 16
+_COMPOSITE_PRICE_FONT_MAX = 38
+_COMPOSITE_PRICE_CURRENCY_FONT = 20
+_COMPOSITE_PRIME_COLOR = (0, 168, 225, 255)
+# ────────────────────────────────────────────────────────────────────
 _COMPOSITE_TITLE_FONT_MIN = int(17 * _FONT_SCALE)
 _COMPOSITE_PORTRAIT_HEIGHT_RATIO = 1.18
 _COMPOSITE_MIN_IMAGE_RATIO = 0.42
@@ -121,6 +131,10 @@ class CreatorsProductCard(NamedTuple):
     prime_exclusive: bool = False
     seller_name: str | None = None
     seller_condition: str | None = None
+    rating: str | None = None
+    review_count: str | None = None
+    bought_past_month: str | None = None
+    urgency_text: str | None = None
 
 
 class CompositeCardSlot(NamedTuple):
@@ -1333,12 +1347,9 @@ def draw_title(
     scale: float,
     trailing_gap: bool = True,
 ) -> int:
-    """Draw title with dynamic line spacing based on font size."""
+    """Draw title using constant line gap to match height measurements."""
     title_font, lines = _resolve_title_layout(draw, title, panel_width, scale)
-    
-    # Calculate dynamic line spacing (22% of font size)
-    font_size = title_font.size if hasattr(title_font, 'size') else int(_scaled(_TITLE_FONT_MAX, scale))
-    line_gap = int(font_size * 0.22)
+    line_gap = _scaled(_TITLE_LINE_GAP, scale)
     
     current_y = y
     for line in lines:
@@ -1557,24 +1568,6 @@ def draw_discount_badge(
     x1 = badge_x - box_w
     y1 = _CORNER_BADGE_MARGIN
 
-    # Outer glow effect for premium visual punch
-    glow_expand = _scaled(6, scale)
-    try:
-        glow_layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-        glow_draw = ImageDraw.Draw(glow_layer)
-        glow_draw.rounded_rectangle(
-            (x1 - glow_expand, y1 - glow_expand,
-             x1 + box_w + glow_expand, y1 + box_h + glow_expand),
-            radius=_scaled(_DISCOUNT_BADGE_RADIUS, scale) + glow_expand,
-            fill=_DISCOUNT_GLOW,
-        )
-        glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(radius=_scaled(8, scale)))
-        canvas.paste(Image.alpha_composite(
-            Image.new("RGBA", canvas.size, (0, 0, 0, 0)), glow_layer,
-        ), (0, 0), glow_layer)
-    except Exception:
-        pass  # Graceful fallback
-
     _draw_pill_badge(
         canvas,
         discount_text,
@@ -1584,8 +1577,8 @@ def draw_discount_badge(
         pad_x=pad_x,
         pad_y=pad_y,
         radius=_scaled(_DISCOUNT_BADGE_RADIUS, scale),
-        fill=_DISCOUNT_RED,
-        text_color=(255, 255, 255, 255),
+        fill=_PANEL_DARK_TOP,
+        text_color=_GOLD_TOP,
     )
     return y1 + text_h + pad_y * 2
 
@@ -1856,7 +1849,7 @@ def _draw_prime_inline(draw: ImageDraw.ImageDraw, x: int, y: int) -> int:
     draw.line(check_pts, fill=(255, 153, 0, 255), width=3)
 
     font = _load_title_font(18, title="prime")
-    draw.text((x + 15, y - 2), "prime", font=font, fill=(0, 168, 225, 255))
+    draw.text((x + 15, y - 2), "prime", font=font, fill=_COMPOSITE_PRIME_COLOR)
     return 15 + _text_bbox(draw, "prime", font)[0]
 
 
@@ -1878,12 +1871,12 @@ def _draw_horizontal_composite_card(
         radius=14,
         fill=(0, 0, 0, 10),
     )
-    # White card fill & light gray border
+    # White card fill & subtle gold border
     draw.rounded_rectangle(
         (x, y, x + w, y + h),
         radius=14,
         fill=(255, 255, 255, 255),
-        outline=(224, 228, 232, 255),
+        outline=_GOLD_BORDER,
         width=1,
     )
 
@@ -1897,10 +1890,22 @@ def _draw_horizontal_composite_card(
         img_area = _render_card_product_image(product.image_path, inner_w, image_h)
         canvas.paste(img_area, (inner_x, y + 16))
 
+    # 3. Discount Badge (Premium dark/gold, top right of the card)
+    discount_text = _discount_badge_text(product.price, product.list_price)
+    if discount_text:
+        badge_font = _load_ui_font(_COMPOSITE_DISCOUNT_BADGE_FONT, discount_text, bold=True)
+        disp_badge = shape_text(discount_text)
+        bw, bh = _text_bbox(draw, disp_badge, badge_font)
+        bpx, bpy = 10, 6
+        bx = inner_x + inner_w - bw - bpx * 2
+        by = y + 16
+        draw.rounded_rectangle((bx, by, bx + bw + bpx * 2, by + bh + bpy * 2), radius=8, fill=_PANEL_DARK_TOP)
+        draw.text((bx + bpx, by + bpy - 1), disp_badge, font=badge_font, fill=_GOLD_TOP)
+
     cursor_y = y + 16 + image_h + 12
 
-    # 3. Arabic Title Area (Bolder, significantly larger, up to 4 lines, RTL right-aligned)
-    title_font_size = 22
+    # 4. Arabic Title Area (Bolder, up to 4 lines, RTL right-aligned)
+    title_font_size = 20
     title_font = _load_title_font(title_font_size, title=product.title)
 
     lines: list[str] = []
@@ -1908,46 +1913,60 @@ def _draw_horizontal_composite_card(
         lines = _wrap_title_lines(draw, product.title.strip(), title_font, inner_w, max_lines=4)
 
     title_start_y = cursor_y
-    line_gap = 4
+    line_gap = 6
     for line in lines:
         display_line = shape_text(line)
         bbox = draw.textbbox((0, 0), display_line, font=title_font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
         line_x = inner_x + inner_w - text_w
-        draw.text((line_x, cursor_y), display_line, font=title_font, fill=(15, 17, 17, 255))
+        draw.text((line_x, cursor_y), display_line, font=title_font, fill=(30, 32, 35, 255))
         cursor_y += text_h + line_gap
 
     # Reserve uniform title block height so lower elements align across all cards
     title_block_h = 108
     cursor_y = title_start_y + title_block_h
 
-    # 4. Rating Line ((1) 5.0 + 5 Gold Stars)
-    rating_font = _load_ui_font(14, "(1) 5.0", bold=False)
-    disp_rating = shape_text("(1) 5.0")
-    r_bbox = draw.textbbox((0, 0), disp_rating, font=rating_font)
-    r_w = r_bbox[2] - r_bbox[0]
+    # 5. Rating Line
+    rating_start_y = cursor_y
+    if product.rating and product.review_count:
+        rating_text = f"{product.rating} ({product.review_count})"
+        disp_rating = shape_text(rating_text)
+        rating_font = _load_ui_font(13, disp_rating, bold=False)
+        r_bbox = draw.textbbox((0, 0), disp_rating, font=rating_font)
+        r_w = r_bbox[2] - r_bbox[0]
 
-    stars_w = 5 * (14 + 3)
-    total_rating_w = r_w + 6 + stars_w
-    rating_x = inner_x + inner_w - total_rating_w
+        stars_w = 5 * (14 + 3)
+        total_rating_w = r_w + 6 + stars_w
+        rating_x = inner_x + inner_w - total_rating_w
 
-    # Draw score text in slate gray #007185
-    draw.text((rating_x + stars_w + 6, cursor_y), disp_rating, font=rating_font, fill=(0, 113, 133, 255))
-    # Draw 5 crisp gold star shapes
-    _draw_star_rating(draw, rating_x, cursor_y + 1, num_stars=5, star_size=14)
+        draw.text((rating_x + stars_w + 6, cursor_y), disp_rating, font=rating_font, fill=(86, 89, 89, 255))
+        _draw_star_rating(draw, rating_x, cursor_y + 1, num_stars=5, star_size=14)
 
-    cursor_y += 24
+    cursor_y = rating_start_y + 22
 
-    # 5. Price Line (Large bold number + stacked/adjacent currency)
+    # Social Proof
+    if product.bought_past_month:
+        disp_social = shape_text(product.bought_past_month)
+        social_font = _load_ui_font(12, disp_social, bold=False)
+        s_bbox = draw.textbbox((0, 0), disp_social, font=social_font)
+        s_w = s_bbox[2] - s_bbox[0]
+        draw.text((inner_x + inner_w - s_w, cursor_y), disp_social, font=social_font, fill=(86, 89, 89, 255))
+
+    # 6. Price Line (Fixed position to guarantee horizontal alignment across cards)
+    price_start_y = y + 416
+    
     price_str = product.price if _valid_price(product.price) else "0"
     num_str, curr_str = _parse_price_display(price_str)
 
-    price_num_font = _load_title_font(34, title=num_str)
-    price_curr_font = _load_ui_font(18, curr_str, bold=True)
+    price_num_font = _load_title_font(_COMPOSITE_PRICE_FONT_MAX, title=num_str)
+    price_curr_font = _load_ui_font(_COMPOSITE_PRICE_CURRENCY_FONT, curr_str, bold=True)
 
     disp_num = shape_text(num_str)
     disp_curr = shape_text(curr_str)
+
+    std_num_bbox = draw.textbbox((0, 0), "1234567890", font=price_num_font)
+    std_curr_bbox = draw.textbbox((0, 0), "جنيه", font=price_curr_font)
 
     num_bbox = draw.textbbox((0, 0), disp_num, font=price_num_font)
     curr_bbox = draw.textbbox((0, 0), disp_curr, font=price_curr_font)
@@ -1958,48 +1977,61 @@ def _draw_horizontal_composite_card(
     total_price_w = num_w + 6 + curr_w
     price_x = inner_x + inner_w - total_price_w
 
-    draw.text((price_x + curr_w + 6, cursor_y), disp_num, font=price_num_font, fill=(15, 17, 17, 255))
-    draw.text((price_x, cursor_y + 10), disp_curr, font=price_curr_font, fill=(86, 89, 89, 255))
+    draw.text((price_x + curr_w + 6, price_start_y), disp_num, font=price_num_font, fill=(15, 17, 17, 255))
+    draw.text((price_x, price_start_y + 10), disp_curr, font=price_curr_font, fill=(100, 100, 105, 255))
 
-    cursor_y += 44
+    # Calculate actual bottom of price block using standard bbox to keep all cards aligned perfectly!
+    price_bottom = price_start_y + max(std_num_bbox[3], std_curr_bbox[3] + 10)
+    prime_start_y = price_bottom + 12
 
-    # 6. Prime & Delivery Badges (Cyan غداً badge + ✓ prime + delivery text)
-    cyan_badge_w = 42
-    cyan_badge_h = 22
-    badge_x = inner_x + inner_w - cyan_badge_w
-    draw.rounded_rectangle(
-        (badge_x, cursor_y, badge_x + cyan_badge_w, cursor_y + cyan_badge_h),
-        radius=4,
-        fill=(0, 168, 225, 255),
-    )
-    gadan_font = _load_ui_font(13, "غداً", bold=True)
-    disp_gadan = shape_text("غداً")
-    gb_box = draw.textbbox((0, 0), disp_gadan, font=gadan_font)
-    g_w = gb_box[2] - gb_box[0]
-    draw.text((badge_x + (cyan_badge_w - g_w) // 2, cursor_y + 2), disp_gadan, font=gadan_font, fill=(255, 255, 255, 255))
+    # 7. Prime & Delivery Badges - Right Aligned
+    prime_reserved_h = 22
+    if product.prime_exclusive:
+        cyan_badge_w = 42
+        cyan_badge_h = prime_reserved_h
+        badge_x = inner_x + inner_w - cyan_badge_w
 
-    # ✓ prime logo next to badge
-    prime_x = badge_x - 72
-    _draw_prime_inline(draw, prime_x, cursor_y + 3)
+        draw.rounded_rectangle(
+            (badge_x, prime_start_y, badge_x + cyan_badge_w, prime_start_y + cyan_badge_h),
+            radius=4,
+            fill=_COMPOSITE_PRIME_COLOR,
+        )
+        gadan_font = _load_ui_font(13, "غداً", bold=True)
+        disp_gadan = shape_text("غداً")
+        gb_box = draw.textbbox((0, 0), disp_gadan, font=gadan_font)
+        g_w = gb_box[2] - gb_box[0]
+        draw.text((badge_x + (cyan_badge_w - g_w) // 2, prime_start_y + 2), disp_gadan, font=gadan_font, fill=(255, 255, 255, 255))
 
-    cursor_y += 28
+        prime_w = 72
+        _draw_prime_inline(draw, badge_x - prime_w, prime_start_y + 3)
+
+    # Regardless of Prime's presence, advance by the reserved slot to keep delivery aligned
+    prime_bottom = prime_start_y + prime_reserved_h
+    deliv_start_y = prime_bottom + 10
 
     # Delivery info line
-    deliv_font = _load_ui_font(14, "توصيل مجاني غداً، 18 أغسطس", bold=False)
+    deliv_font = _load_ui_font(13, "توصيل مجاني غداً، 18 أغسطس", bold=False)
     deliv_text = "توصيل مجاني غداً، 18 أغسطس"
     disp_deliv = shape_text(deliv_text)
     d_bbox = draw.textbbox((0, 0), disp_deliv, font=deliv_font)
     d_w = d_bbox[2] - d_bbox[0]
-    draw.text((inner_x + inner_w - d_w, cursor_y), disp_deliv, font=deliv_font, fill=(86, 89, 89, 255))
-
-    # 7. Add to Cart Button (Yellow CTA button at bottom of card)
+    draw.text((inner_x + inner_w - d_w, deliv_start_y), disp_deliv, font=deliv_font, fill=(15, 17, 17, 255))
+    
+    # 8. CTA and Urgency
     btn_h = 42
     btn_y = y + h - btn_h - 14
-    draw.rounded_rectangle(
-        (inner_x, btn_y, inner_x + inner_w, btn_y + btn_h),
-        radius=12,
-        fill=(255, 216, 20, 255),
-    )
+    
+    urgency_start_y = btn_y - 28
+    if product.urgency_text:
+        disp_urg = shape_text(product.urgency_text)
+        urg_font = _load_ui_font(13, disp_urg, bold=False)
+        u_bbox = draw.textbbox((0, 0), disp_urg, font=urg_font)
+        u_w = u_bbox[2] - u_bbox[0]
+        draw.text((inner_x + inner_w - u_w, urgency_start_y), disp_urg, font=urg_font, fill=(204, 12, 57, 255))
+
+    draw.rounded_rectangle((inner_x, btn_y + 2, inner_x + inner_w, btn_y + btn_h + 2), radius=12, fill=(0, 0, 0, 15))
+    draw.rounded_rectangle((inner_x, btn_y, inner_x + inner_w, btn_y + btn_h), radius=12, fill=_GOLD_TOP)
+
     btn_font = _load_title_font(16, title="إضافة إلى عربة التسوق")
     disp_btn = shape_text("إضافة إلى عربة التسوق")
     btn_bbox = draw.textbbox((0, 0), disp_btn, font=btn_font)
@@ -2034,10 +2066,7 @@ def _apply_frame_creators_composite(
         frame_path = "frame.png"
         if os.path.exists(frame_path):
             frame_img = Image.open(frame_path).convert("RGBA")
-            # Extract small brand logo from top-left if available or draw green circle badge
-            draw_top = ImageDraw.Draw(canvas)
-            draw_top.ellipse((pad_x, pad_y - 8, pad_x + 36, pad_y + 28), fill=(40, 167, 69, 255))
-            draw_top.ellipse((pad_x + 8, pad_y, pad_x + 28, pad_y + 20), fill=(255, 255, 255, 255))
+            # Green circle removed from here since discount is now on the card itself
     except Exception:
         pass
 
