@@ -652,6 +652,29 @@ async def scrape_amazon(
         if coupon and coupon_detection_enabled:
             coupon_already_applied = await _detect_coupon_already_applied(page)
 
+        merchant_id = await page.evaluate("""() => {
+            let mInput = document.querySelector('input[name="merchantID"]');
+            if (mInput && mInput.value) return mInput.value;
+            
+            let sellerLink = document.querySelector('#sellerProfileTriggerId');
+            if (sellerLink && sellerLink.href) {
+                let m = sellerLink.href.match(/seller=([A-Z0-9]+)/);
+                if (m) return m[1];
+            }
+            
+            let merchantInfo = document.querySelector('#merchant-info');
+            if (merchantInfo && merchantInfo.innerText.toLowerCase().includes('amazon')) {
+                return 'AMAZON_RETAIL';
+            }
+            
+            let hasBuyBox = !!document.querySelector('#add-to-cart-button') || !!document.querySelector('#buy-now-button');
+            if (hasBuyBox) {
+                return 'UNKNOWN_BUYBOX_WINNER';
+            }
+            
+            return null;
+        }""")
+
         if title != "Not found":
             await page.screenshot(
                 path=screenshot_path,
@@ -699,6 +722,7 @@ async def scrape_amazon(
             "coupon": coupon,
             "coupon_already_applied": coupon_already_applied,
             "screenshot": screenshot_path,
+            "merchant_id": merchant_id,
         }
     finally:
         await context.close()

@@ -770,36 +770,46 @@ async def fetch_product(
             if not item or item.title == "Not found":
                 if seller_type == "AMAZON_RESALE":
                     logger.warning("RESALE OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin.upper())
+                    return {
+                        "asin": asin.upper(),
+                        "title": getattr(item, "title", "Not found") if item else "Not found",
+                        "price": "Not found",
+                        "seller_type": seller_type,
+                        "merchant_id": target_merchant_id,
+                        "seller_offer_available": False,
+                        "data_source": "creators",
+                        "screenshot": None,
+                    }
                 else:
-                    logger.warning("NEW OFFER MISSING asin=%s action=ABORT_PUBLISH", asin.upper())
-                return {
-                    "asin": asin.upper(),
-                    "title": getattr(item, "title", "Not found") if item else "Not found",
-                    "price": "Not found",
-                    "seller_type": seller_type,
-                    "merchant_id": target_merchant_id,
-                    "seller_offer_available": False,
-                    "data_source": "creators",
-                    "screenshot": None,
-                }
+                    logger.info("NEW OFFER MISSING IN API (item not found)\nasin=%s\ntarget_merchant_id=%s", asin.upper(), target_merchant_id)
+                    raise CreatorsAPIError(f"Target merchant {target_merchant_id} or item missing from API response")
 
             status, p_text, p_val, l_text, l_val, s_name, s_cond = extract_seller_offer(item, seller_type)
 
             if status != "AVAILABLE" or not p_text or p_text == "Not found":
                 if seller_type == "AMAZON_RESALE":
                     logger.warning("RESALE OFFER MISSING asin=%s action=ABORT_REPUBLISH", asin.upper())
+                    return {
+                        "asin": asin.upper(),
+                        "title": item.title,
+                        "price": "Not found",
+                        "seller_type": seller_type,
+                        "merchant_id": target_merchant_id,
+                        "seller_offer_available": False,
+                        "data_source": "creators",
+                        "screenshot": None,
+                    }
                 else:
-                    logger.warning("NEW OFFER MISSING asin=%s action=ABORT_PUBLISH", asin.upper())
-                return {
-                    "asin": asin.upper(),
-                    "title": item.title,
-                    "price": "Not found",
-                    "seller_type": seller_type,
-                    "merchant_id": target_merchant_id,
-                    "seller_offer_available": False,
-                    "data_source": "creators",
-                    "screenshot": None,
-                }
+                    logger.info(
+                        "NEW OFFER MISSING IN API\n"
+                        "asin=%s\n"
+                        "target_merchant_id=%s\n"
+                        "api_buybox_merchant_id=%s",
+                        asin.upper(),
+                        target_merchant_id,
+                        avail_m_ids[0] if avail_m_ids else "None"
+                    )
+                    raise CreatorsAPIError(f"Target merchant {target_merchant_id} missing from API response (lost buy box?)")
 
             if scrape_key.startswith("republish_"):
                 log_log_fn(
@@ -933,6 +943,13 @@ async def fetch_product(
         raise RuntimeError("Playwright browser not available and Creators API failed")
 
     logger.info("CREATORS API FALLBACK reason=creators_api_unavailable_or_failed asin=%s — starting Playwright scrape", asin)
+    logger.info(
+        "NEW AMAZON PLAYWRIGHT FALLBACK START\n"
+        "asin=%s\n"
+        "target_merchant_id=%s",
+        asin.upper(),
+        target_merchant_id
+    )
     product = await scrape_amazon(
         browser,
         clean_url,
@@ -943,7 +960,39 @@ async def fetch_product(
     product["image_url"] = None
     product["detail_page_url"] = ""
     product["asin"] = asin.upper()
+    product["seller_type"] = seller_type
     
+    scraped_merchant_id = product.get("merchant_id")
+    found = False
+    
+    # Check if merchant is Amazon Retail
+    if scraped_merchant_id == 'AMAZON_RETAIL' or scraped_merchant_id == target_merchant_id:
+        found = True
+        product["merchant_id"] = target_merchant_id
+        product["seller_offer_available"] = True
+    else:
+        product["merchant_id"] = scraped_merchant_id or "UNKNOWN"
+        product["seller_offer_available"] = False
+        product["price"] = "Not found"
+
+    logger.info(
+        "NEW AMAZON PLAYWRIGHT FALLBACK RESULT\n"
+        "asin=%s\n"
+        "found=%s\n"
+        "merchant_id=%s\n"
+        "seller_name=%s\n"
+        "price=%s",
+        asin.upper(),
+        str(found).lower(),
+        product.get("merchant_id"),
+        "Amazon" if found else "3P/Unknown",
+        product.get("price")
+    )
+
+    if not found:
+        logger.warning("NEW OFFER MISSING asin=%s action=ABORT_PUBLISH (Playwright found third-party %s instead of Amazon)", asin.upper(), scraped_merchant_id)
+        return product
+
     # Validate price after Playwright scrape
     if not _valid_price(product.get("price")):
         logger.warning(
