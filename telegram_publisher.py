@@ -164,6 +164,8 @@ async def publish_to_channel(
     source: str = "database",
     caption_entities: list[MessageEntity] | None = None,
 ) -> Message:
+    if parse_mode is None and not caption_entities:
+        parse_mode = "Markdown"
     caption = strip_html_tags(caption)
     last_error: Exception | None = None
 
@@ -256,6 +258,8 @@ async def publish_to_channel_with_overflow(
     Returns:
         The photo message object
     """
+    if parse_mode is None and not caption_entities:
+        parse_mode = "Markdown"
     caption = strip_html_tags(caption)
     caption_length = len(caption)
     overflow_triggered = caption_length > SAFE_CAPTION_LENGTH
