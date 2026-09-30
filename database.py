@@ -248,6 +248,8 @@ class Database:
                 ("previous_message_id", "INTEGER"),
                 ("previous_published_price", "TEXT"),
                 ("previous_published_at", "TEXT"),
+                ("original_published_price", "TEXT"),
+                ("original_published_price_value", "REAL"),
             ):
                 if col not in published_cols:
                     conn.execute(
@@ -402,6 +404,41 @@ class Database:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_price_history_asin_seller_at "
                 "ON price_history (asin, seller_type, recorded_at DESC)"
+            )
+
+            # Backfill original_published_price_value from earliest 'initial' price_history record for legacy products
+            conn.execute(
+                """
+                UPDATE published_products
+                SET original_published_price_value = (
+                    SELECT ph.final_price
+                    FROM price_history ph
+                    WHERE ph.asin = published_products.asin
+                      AND ph.change_type = 'initial'
+                      AND ph.final_price IS NOT NULL
+                      AND ph.final_price > 0
+                    ORDER BY ph.recorded_at ASC, ph.id ASC
+                    LIMIT 1
+                ),
+                original_published_price = (
+                    SELECT COALESCE(ph.price, printf('%.2f', ph.final_price))
+                    FROM price_history ph
+                    WHERE ph.asin = published_products.asin
+                      AND ph.change_type = 'initial'
+                      AND ph.final_price IS NOT NULL
+                      AND ph.final_price > 0
+                    ORDER BY ph.recorded_at ASC, ph.id ASC
+                    LIMIT 1
+                )
+                WHERE original_published_price_value IS NULL
+                  AND EXISTS (
+                      SELECT 1 FROM price_history ph2
+                      WHERE ph2.asin = published_products.asin
+                        AND ph2.change_type = 'initial'
+                        AND ph2.final_price IS NOT NULL
+                        AND ph2.final_price > 0
+                  )
+                """
             )
 
             # Migration: Ensure availability, last valid price, and reference price columns in published_products
@@ -854,17 +891,22 @@ class Database:
         seller_type: str = "NEW_AMAZON",
         image_path: str | None = None,
         clean_url: str | None = None,
+        original_published_price: str | None = None,
+        original_published_price_value: float | None = None,
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         merchant_id = "A2N2MP47XAP1MK" if seller_type == "AMAZON_RESALE" else "A1ZVRGNO5AYLOV"
+        orig_price = original_published_price or published_price
+        orig_val = original_published_price_value if original_published_price_value is not None else published_price_value
         with self._connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO published_products
                     (asin, title, source_channel_id, destination_message_id, published_at,
                      destination_id, published_price, published_price_value, published_list_price,
-                     published_list_price_value, published_currency, seller_type, image_path, clean_url)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     published_list_price_value, published_currency, seller_type, image_path, clean_url,
+                     original_published_price, original_published_price_value)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     asin.upper(),
@@ -881,6 +923,8 @@ class Database:
                     seller_type,
                     image_path,
                     clean_url,
+                    orig_price,
+                    orig_val,
                 ),
             )
             conn.commit()
@@ -913,13 +957,290 @@ class Database:
             row = conn.execute(
                 """
                 SELECT * FROM published_products
-                WHERE asin = ?
+                WHERE UPPER(asin) = UPPER(?)
                 ORDER BY published_at DESC, id DESC
                 LIMIT 1
                 """,
                 (asin.upper(),),
             ).fetchone()
         return dict(row) if row else None
+
+    def find_or_create_radar_product(
+        self,
+        asin: str,
+        title: str,
+        price_text: str | None = None,
+        price_value: float | None = None,
+        clean_url: str | None = None,
+        seller_type: str = "NEW_AMAZON",
+        source_channel_id: int = 0,
+        destination_message_id: int | None = None,
+        destination_id: int | None = None,
+        image_path: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """
+        Atomically find or create a radar product record in `published_products`.
+
+        Uses a `BEGIN IMMEDIATE` transaction to prevent race conditions during concurrent searches.
+
+        Returns:
+            (product_dict, is_new: bool)
+        """
+        asin_upper = asin.upper()
+        now = datetime.now(timezone.utc).isoformat()
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE;")
+            row = conn.execute(
+                """
+                SELECT * FROM published_products
+                WHERE UPPER(asin) = UPPER(?)
+                ORDER BY published_at DESC, id DESC
+                LIMIT 1
+                """,
+                (asin_upper,),
+            ).fetchone()
+
+            if row:
+                p_dict = dict(row)
+                p_id = p_dict["id"]
+                updates = []
+                params = []
+
+                if price_value is not None and price_value > 0:
+                    updates.append("last_price_check = ?")
+                    params.append(price_value)
+                    if seller_type == "AMAZON_RESALE":
+                        updates.append("resale_last_valid_price = ?")
+                        updates.append("resale_availability = 'AVAILABLE'")
+                        params.append(price_value)
+                    else:
+                        updates.append("new_last_valid_price = ?")
+                        updates.append("new_availability = 'AVAILABLE'")
+                        params.append(price_value)
+
+                updates.append("last_checked_at = ?")
+                params.append(now)
+
+                if updates:
+                    params.append(p_id)
+                    conn.execute(
+                        f"UPDATE published_products SET {', '.join(updates)} WHERE id = ?",
+                        tuple(params),
+                    )
+
+                updated_row = conn.execute(
+                    "SELECT * FROM published_products WHERE id = ?",
+                    (p_id,),
+                ).fetchone()
+                conn.commit()
+                return dict(updated_row) if updated_row else p_dict, False
+            else:
+                orig_price = price_text
+                orig_val = price_value
+
+                new_avail = "AVAILABLE" if (seller_type == "NEW_AMAZON" and price_value and price_value > 0) else "AVAILABLE"
+                new_last_val = price_value if seller_type == "NEW_AMAZON" else None
+                resale_avail = "AVAILABLE" if (seller_type == "AMAZON_RESALE" and price_value and price_value > 0) else "OUT_OF_STOCK"
+                resale_last_val = price_value if seller_type == "AMAZON_RESALE" else None
+
+                cur = conn.execute(
+                    """
+                    INSERT INTO published_products
+                        (asin, title, source_channel_id, destination_message_id, published_at,
+                         destination_id, published_price, published_price_value, published_currency,
+                         seller_type, image_path, clean_url, original_published_price, original_published_price_value,
+                         last_price_check, last_checked_at, new_availability, new_last_valid_price,
+                         resale_availability, resale_last_valid_price)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        asin_upper,
+                        title,
+                        source_channel_id,
+                        destination_message_id,
+                        now,
+                        destination_id,
+                        price_text,
+                        price_value,
+                        "EGP",
+                        seller_type,
+                        image_path,
+                        clean_url,
+                        orig_price,
+                        orig_val,
+                        price_value,
+                        now,
+                        new_avail,
+                        new_last_val,
+                        resale_avail,
+                        resale_last_val,
+                    ),
+                )
+                pid = int(cur.lastrowid)
+                new_row = conn.execute(
+                    "SELECT * FROM published_products WHERE id = ?",
+                    (pid,),
+                ).fetchone()
+                conn.commit()
+                return dict(new_row), True
+
+    def record_price_history_if_changed(
+        self,
+        asin: str,
+        seller_type: str,
+        price_text: str | None,
+        price_value: float | None,
+        tracked_product_id: int | None = None,
+        availability: str = "AVAILABLE",
+        list_text: str | None = None,
+        list_val: float | None = None,
+        coupon: str | None = None,
+        seller_name: str | None = None,
+        seller_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Record a price history entry ONLY if:
+        1. Valid price (not None, non-empty, not 'Not found', numeric > 0).
+        2. First record for this ASIN + seller_type (change_type='initial').
+        3. Or price differs from latest recorded price for this ASIN + seller_type (change_type='price_change').
+
+        If current price equals latest recorded price, returns None (no duplicate history row).
+        """
+        if not price_text or price_text.strip() == "Not found":
+            return None
+        if price_value is None or price_value <= 0:
+            return None
+
+        asin_upper = asin.upper()
+        s_id = seller_id or ("A2N2MP47XAP1MK" if seller_type == "AMAZON_RESALE" else "A1ZVRGNO5AYLOV")
+
+        with self._connect() as conn:
+            latest = conn.execute(
+                """
+                SELECT * FROM price_history
+                WHERE UPPER(asin) = UPPER(?) AND seller_type = ?
+                ORDER BY recorded_at DESC, id DESC
+                LIMIT 1
+                """,
+                (asin_upper, seller_type),
+            ).fetchone()
+
+            if latest:
+                latest_dict = dict(latest)
+                latest_final = latest_dict.get("final_price")
+                latest_avail = latest_dict.get("availability")
+                if latest_avail == "AVAILABLE" and latest_final is not None and abs(float(latest_final) - float(price_value)) < 0.01:
+                    return None
+                change_type = "price_change"
+                price_diff = float(price_value) - float(latest_final) if latest_final is not None else 0.0
+            else:
+                change_type = "initial"
+                price_diff = 0.0
+
+            now = datetime.now(timezone.utc).isoformat()
+            cur = conn.execute(
+                """
+                INSERT INTO price_history
+                    (asin, price, price_value, final_price, list_price, list_price_value,
+                     coupon, seller_name, availability, change_type, recorded_at,
+                     price_source, seller_type, seller_id, tracked_product_id, price_change_amount)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    asin_upper,
+                    price_text,
+                    price_value,
+                    price_value,
+                    list_text,
+                    list_val,
+                    coupon,
+                    seller_name,
+                    availability,
+                    change_type,
+                    now,
+                    "creators_api",
+                    seller_type,
+                    s_id,
+                    tracked_product_id,
+                    price_diff,
+                ),
+            )
+            conn.commit()
+            hid = int(cur.lastrowid)
+            row = conn.execute("SELECT * FROM price_history WHERE id = ?", (hid,)).fetchone()
+            return dict(row) if row else None
+
+
+    def get_original_publishing_price(
+        self,
+        published_id: int | None = None,
+        asin: str | None = None,
+    ) -> tuple[float | None, str | None, str]:
+        """Retrieve the authoritative original publishing price for a product.
+
+        Returns:
+            (price_value: float | None, price_text: str | None, currency: str)
+        """
+        currency = "EGP"
+        with self._connect() as conn:
+            row = None
+            if published_id:
+                row = conn.execute(
+                    "SELECT * FROM published_products WHERE id = ?",
+                    (published_id,),
+                ).fetchone()
+
+            if not row and asin:
+                row = conn.execute(
+                    """
+                    SELECT * FROM published_products
+                    WHERE asin = ?
+                    ORDER BY published_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (asin.upper(),),
+                ).fetchone()
+
+            if row:
+                r_dict = dict(row)
+                currency = r_dict.get("published_currency") or "EGP"
+                asin_clean = r_dict.get("asin", "").upper()
+
+                # 1. If original_published_price_value exists and > 0, use it.
+                orig_val = r_dict.get("original_published_price_value")
+                orig_txt = r_dict.get("original_published_price")
+                if orig_val is not None and float(orig_val) > 0:
+                    return float(orig_val), orig_txt or str(orig_val), currency
+
+                # 2. Otherwise, look for a trustworthy initial price_history record:
+                #    change_type = 'initial', final_price > 0, earliest recorded_at
+                if asin_clean:
+                    earliest_ph = conn.execute(
+                        """
+                        SELECT final_price, price
+                        FROM price_history
+                        WHERE asin = ? AND change_type = 'initial' AND final_price IS NOT NULL AND final_price > 0
+                        ORDER BY recorded_at ASC, id ASC
+                        LIMIT 1
+                        """,
+                        (asin_clean,),
+                    ).fetchone()
+                    if earliest_ph and earliest_ph[0] is not None:
+                        val = float(earliest_ph[0])
+                        txt = earliest_ph[1] or str(val)
+                        # 3. Recover and persist it into original_published_price_value
+                        target_id = published_id or r_dict.get("id")
+                        if target_id:
+                            conn.execute(
+                                "UPDATE published_products SET original_published_price_value = ?, original_published_price = ? WHERE id = ?",
+                                (val, txt, target_id),
+                            )
+                            conn.commit()
+                        return val, txt, currency
+
+                # 4. If neither source exists: Publishing Price must remain N/A
+                return None, None, currency
 
     def list_unique_published_products(self, limit: int | None = None) -> list[dict[str, Any]]:
         """Most recent published row per unique ASIN, prioritized by oldest last_checked_at."""
@@ -1028,6 +1349,25 @@ class Database:
                 published_id,
             )
 
+            orig_val = dict(current).get("original_published_price_value") if current else None
+            orig_txt = dict(current).get("original_published_price") if current else None
+            if orig_val is None and current:
+                asin_curr = dict(current).get("asin", "").upper()
+                if asin_curr:
+                    init_row = conn.execute(
+                        """
+                        SELECT final_price, price
+                        FROM price_history
+                        WHERE asin = ? AND change_type = 'initial' AND final_price IS NOT NULL AND final_price > 0
+                        ORDER BY recorded_at ASC, id ASC
+                        LIMIT 1
+                        """,
+                        (asin_curr,),
+                    ).fetchone()
+                    if init_row:
+                        orig_val = float(init_row[0])
+                        orig_txt = init_row[1] or str(orig_val)
+
             if current:
                 conn.execute(
                     """
@@ -1036,6 +1376,8 @@ class Database:
                         previous_message_id = destination_message_id,
                         previous_published_price = published_price,
                         previous_published_at = published_at,
+                        original_published_price = COALESCE(original_published_price, ?),
+                        original_published_price_value = COALESCE(original_published_price_value, ?),
                         title = ?,
                         source_channel_id = ?,
                         destination_message_id = ?,
@@ -1052,6 +1394,8 @@ class Database:
                     WHERE id = ?
                     """,
                     (
+                        orig_txt,
+                        orig_val,
                         title,
                         source_channel_id,
                         destination_message_id,

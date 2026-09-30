@@ -59,8 +59,15 @@ from product_fetcher import (
     fetch_product,
     resolve_display_url,
 )
+
+
+def _valid_price(text: str | None) -> bool:
+    """Check if price is valid (not None, not empty, not 'Not found')."""
+    return bool(text) and text.strip() != "Not found"
+
 from telegram_publisher import build_resale_caption
 from published_price import (
+    calculate_publish_recommendation,
     drop_index_emoji,
     extract_published_price_fields,
     format_currency_amount,
@@ -86,6 +93,23 @@ CB_VIEW_OLD_POST = "view_old_post:"
 CB_PRICE_HISTORY_LIST = "ph_list"
 CB_PRICE_HISTORY_VIEW = "ph_view:"
 CB_PRICE_CHART_VIEW = "ph_chart:"
+
+# Interactive product-monitoring message callbacks
+CB_PM_PUBLISH = "pm_publish:"
+CB_PM_HISTORY = "pm_history:"
+CB_PM_REFRESH = "pm_refresh:"
+CB_PM_BACK = "pm_back:"
+
+# Atomic publish locks — asyncio.Lock per published_id
+_pm_publish_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_pm_publish_lock(published_id: int) -> asyncio.Lock:
+    """Get or create an asyncio.Lock for a specific published product."""
+    if published_id not in _pm_publish_locks:
+        _pm_publish_locks[published_id] = asyncio.Lock()
+    return _pm_publish_locks[published_id]
+
 
 _MAX_PRODUCTS_PER_MESSAGE = 8
 _TELEGRAM_TEXT_LIMIT = 4000
@@ -188,20 +212,16 @@ def channel_post_url(channel_id: int, message_id: int) -> str:
 
 
 def _format_drop_block(index: int, drop: dict[str, Any]) -> str:
-    currency = drop.get("currency") or "EGP"
-    published_display = drop.get("published_price") or format_currency_amount(
-        drop["published_value"], currency
-    )
-    current_display = drop.get("current_price") or format_currency_amount(
-        drop["current_value"], currency
-    )
-    savings = drop["published_value"] - drop["current_value"]
-    return (
-        f"{drop_index_emoji(index)} <b>{html_escape(short_title(drop['title']))}</b>\n\n"
-        f"Published:\n{html_escape(published_display)}\n\n"
-        f"Current:\n{html_escape(current_display)}\n\n"
-        f"Difference:\n{html_escape(format_savings(savings, currency))}"
-    )
+    """Format a drop block using the unified recommendation-first formatter."""
+    prod = {
+        "title": drop.get("title", ""),
+        "asin": drop.get("asin", ""),
+        "seller_type": drop.get("seller_type", "NEW_AMAZON"),
+        "current_price_value": drop.get("current_value"),
+        "original_published_price_value": drop.get("published_value"),
+        "new_availability": "AVAILABLE",
+    }
+    return format_pm_product_message(prod, {}, currency=drop.get("currency", "EGP"))
 
 
 def _build_drop_keyboard(drops: list[dict[str, Any]]) -> InlineKeyboardMarkup:
@@ -222,6 +242,48 @@ def _build_drop_keyboard(drops: list[dict[str, Any]]) -> InlineKeyboardMarkup:
                 )
             )
         rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_pm_keyboard(
+    published_id: int,
+    product: dict[str, Any] | None = None,
+    include_publish: bool = True,
+) -> InlineKeyboardMarkup:
+    """Build the interactive button grid for the product-monitoring and alert messages."""
+    product = product or {}
+    asin = product.get("asin") or ""
+    clean_url = product.get("clean_url") or build_clean_url(asin, AMAZON_DOMAIN)
+    if not clean_url or not clean_url.startswith("http"):
+        clean_url = f"https://{AMAZON_DOMAIN}/dp/{asin}" if asin else f"https://{AMAZON_DOMAIN}"
+
+    row1: list[InlineKeyboardButton] = []
+    if include_publish:
+        row1.append(
+            InlineKeyboardButton(
+                "🚨 انشر العرض",
+                callback_data=f"{CB_PM_PUBLISH}{published_id}",
+            )
+        )
+    row1.append(
+        InlineKeyboardButton(
+            "📊 سجل الأسعار",
+            callback_data=f"{CB_PM_HISTORY}{published_id}",
+        )
+    )
+
+    row2: list[InlineKeyboardButton] = [
+        InlineKeyboardButton(
+            "🔄 تحديث",
+            callback_data=f"{CB_PM_REFRESH}{published_id}",
+        ),
+        InlineKeyboardButton(
+            "🔗 فتح المنتج",
+            url=clean_url,
+        ),
+    ]
+
+    rows = [row1, row2]
     return InlineKeyboardMarkup(rows)
 
 
@@ -629,25 +691,26 @@ async def evaluate_product_price_check(
             # Priority 1: Price Drop + Restock (curr_final < effective_prev)
             if curr_final < effective_prev:
                 reason = "price_drop_and_restock"
-                if seller_type == "NEW_AMAZON":
-                    msg_text = format_detailed_price_drop_message(
-                        title=product["title"],
-                        current_price=curr_final,
-                        previous_price=effective_prev,
-                        currency=currency,
-                        stats=stats,
-                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={NEW_AMAZON_SELLER_ID}",
-                        coupon=product.get("coupon"),
-                    )
+                prod_for_alert = dict(product)
+                if seller_type == "AMAZON_RESALE":
+                    prod_for_alert["resale_last_valid_price"] = curr_final
+                    prod_for_alert["seller_type"] = "AMAZON_RESALE"
                 else:
-                    msg_text = format_resale_price_drop_message(
-                        title=product["title"],
-                        current_price=curr_final,
-                        previous_price=effective_prev,
-                        currency=currency,
-                        stats=stats,
-                        product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={AMAZON_RESALE_SELLER_ID}",
-                    )
+                    prod_for_alert["new_last_valid_price"] = curr_final
+                    prod_for_alert["seller_type"] = "NEW_AMAZON"
+                prod_for_alert["current_price_value"] = curr_final
+
+                orig_val, orig_txt, orig_curr = db.get_original_publishing_price(
+                    published_id=product.get("id"), asin=asin
+                )
+                prod_for_alert["original_published_price_value"] = orig_val
+                prod_for_alert["original_published_price"] = orig_txt
+                if orig_curr:
+                    currency = orig_curr
+                    prod_for_alert["published_currency"] = orig_curr
+
+                msg_text = format_pm_product_message(prod_for_alert, stats, currency, db=db)
+                restock_reply_markup = _build_pm_keyboard(product["id"], prod_for_alert)
             # Priority 2: Smart Restock Deal (ref_discount_pct >= deal_threshold_pct)
             elif ref_discount_pct >= deal_threshold_pct and ref_price and ref_price > curr_final:
                 reason = "smart_restock_deal"
@@ -709,6 +772,8 @@ async def evaluate_product_price_check(
                     "published_id": product["id"],
                     "asin": asin,
                     "message_text": msg_text,
+                    "reply_markup": restock_reply_markup if 'restock_reply_markup' in locals() else _build_pm_keyboard(product["id"], product),
+                    "product": prod_for_alert if 'prod_for_alert' in locals() else product,
                 }
             )
             continue
@@ -819,26 +884,28 @@ async def evaluate_product_price_check(
             stats = db.get_price_history_stats(asin, seller_type=seller_type, current_override_price=curr_final)
             currency = product.get("published_currency") or "EGP"
 
-            if seller_type == "NEW_AMAZON":
-                msg_text = format_detailed_price_drop_message(
-                    title=product["title"],
-                    current_price=curr_final,
-                    previous_price=effective_prev,
-                    currency=currency,
-                    stats=stats,
-                    coupon=product.get("coupon"),
-                    seller=seller_name,
-                    product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={NEW_AMAZON_SELLER_ID}",
-                )
+            prod_for_alert = dict(product)
+            if seller_type == "AMAZON_RESALE":
+                prod_for_alert["resale_last_valid_price"] = curr_final
+                prod_for_alert["seller_type"] = "AMAZON_RESALE"
             else:
-                msg_text = format_resale_price_drop_message(
-                    title=product["title"],
-                    current_price=curr_final,
-                    previous_price=effective_prev,
-                    currency=currency,
-                    stats=stats,
-                    product_url=f"https://{AMAZON_DOMAIN}/dp/{asin}?m={AMAZON_RESALE_SELLER_ID}",
-                )
+                prod_for_alert["new_last_valid_price"] = curr_final
+                prod_for_alert["seller_type"] = "NEW_AMAZON"
+            prod_for_alert["current_price_value"] = curr_final
+
+            orig_val, orig_txt, orig_curr = db.get_original_publishing_price(
+                published_id=product.get("id"), asin=asin
+            )
+            prod_for_alert["original_published_price_value"] = orig_val
+            prod_for_alert["original_published_price"] = orig_txt
+            if orig_curr:
+                currency = orig_curr
+                prod_for_alert["published_currency"] = orig_curr
+
+            msg_text = format_pm_product_message(prod_for_alert, stats, currency, db=db)
+            alert_reply_markup = _build_pm_keyboard(product["id"], prod_for_alert)
+
+            if seller_type == "AMAZON_RESALE":
                 logger.info(
                     "RESALE OFFER DETECTED asin=%s merchant_id=%s current_price=%.2f previous_price=%.2f previous_availability=%s alert_decision=ALERT_QUEUED alert_reason=PRICE_DROP",
                     asin,
@@ -853,6 +920,8 @@ async def evaluate_product_price_check(
                     "published_id": product["id"],
                     "asin": asin,
                     "message_text": msg_text,
+                    "reply_markup": alert_reply_markup,
+                    "product": prod_for_alert,
                 }
             )
 
@@ -946,10 +1015,16 @@ def _format_single_product_result_card(
     return "\n".join(lines)
 
 
-async def run_single_product_price_check(db: Database, input_text: str) -> dict[str, Any]:
+async def run_single_product_price_check(
+    db: Database,
+    input_text: str,
+    browser: Any | None = None,
+) -> dict[str, Any]:
     """
     Check a single product given an ASIN or Amazon URL.
-    Reuses the SAME core evaluation engine as automatic price monitoring.
+    Idempotent find-or-create radar product flow with valid price enforcement.
+    Uses the unified product fetch pipeline (including Playwright fallback) when Creators API
+    returns partial/missing offers.
     """
     asin = await resolve_asin_from_input(input_text)
     if not asin or not is_valid_asin(asin):
@@ -959,15 +1034,7 @@ async def run_single_product_price_check(db: Database, input_text: str) -> dict[
             "message": "❌ Invalid Amazon ASIN",
         }
 
-    row = db.get_published_product_by_asin(asin)
-    existing_product = row is not None
-
-    logger.debug(
-        "PRICE MONITOR → SINGLE CHECK START input=%s asin=%s existing_product=%s",
-        input_text,
-        asin,
-        existing_product,
-    )
+    asin = asin.upper()
 
     client = get_creators_client()
     if not client or not creators_api_configured():
@@ -984,50 +1051,171 @@ async def run_single_product_price_check(db: Database, input_text: str) -> dict[
         "offersV2.listings.condition",
     ]
 
+    resolved_input = await resolve_product_input(input_text, AMAZON_DOMAIN)
+    stype = resolved_input.seller_type if resolved_input else "NEW_AMAZON"
+    curl = resolved_input.clean_url if resolved_input else build_clean_url(asin, AMAZON_DOMAIN)
+    target_merchant_id = NEW_AMAZON_SELLER_ID if stype == "NEW_AMAZON" else AMAZON_RESALE_SELLER_ID
+
     logger.debug("PRICE MONITOR → SINGLE CHECK FETCH START asin=%s", asin)
+
+    valid_offer_found = False
+    valid_price_val: float | None = None
+    valid_price_txt: str | None = None
+    list_txt: str | None = None
+    list_val: float | None = None
+    seller_name: str | None = None
+    title: str | None = None
+
+    fetch_source = "CreatorsAPI"
+    api_price: str | None = None
+    api_availability: str | None = None
+    fallback_triggered = False
+    rejection_reason: str = "Price unavailable or untrustworthy"
+
+    # Attempt 1: Creators API direct call
     fetched_items = await client.get_items([asin], expanded_profile, db=db, profile="price_drop")
     item = fetched_items.get(asin)
 
-    if not existing_product:
-        logger.debug("PRICE MONITOR → SINGLE CHECK NEW PRODUCT asin=%s", asin)
-        title = item.title if (item and item.title and item.title != "Not found") else f"Amazon Product ({asin})"
-        new_price_val = None
-        new_price_txt = None
-        if item and hasattr(item, "offers") and isinstance(item.offers, dict) and "NEW_AMAZON" in item.offers:
-            new_price_val = item.offers["NEW_AMAZON"].get("price_value")
-            new_price_txt = item.offers["NEW_AMAZON"].get("price_text")
+    if item and getattr(item, "title", None) and item.title != "Not found":
+        title = str(item.title)
+        status, price_text, price_val, l_txt, l_val, s_name, _ = extract_seller_offer(item, stype)
+        api_price = price_text
+        api_availability = status
+        if status == "AVAILABLE" and price_val and price_val > 0 and _valid_price(price_text):
+            valid_offer_found = True
+            valid_price_val = price_val
+            valid_price_txt = price_text
+            list_txt = l_txt
+            list_val = l_val
+            seller_name = s_name
+            rejection_reason = "Valid Creators API offer found"
+        else:
+            # Check alt seller type
+            alt_stype = "AMAZON_RESALE" if stype == "NEW_AMAZON" else "NEW_AMAZON"
+            alt_status, alt_price_text, alt_price_val, alt_l_txt, alt_l_val, alt_s_name, _ = extract_seller_offer(item, alt_stype)
+            if alt_status == "AVAILABLE" and alt_price_val and alt_price_val > 0 and _valid_price(alt_price_text):
+                valid_offer_found = True
+                valid_price_val = alt_price_val
+                valid_price_txt = alt_price_text
+                list_txt = alt_l_txt
+                list_val = alt_l_val
+                seller_name = alt_s_name
+                stype = alt_stype
+                target_merchant_id = NEW_AMAZON_SELLER_ID if stype == "NEW_AMAZON" else AMAZON_RESALE_SELLER_ID
+                rejection_reason = f"Valid Creators API offer found ({stype})"
 
-        resolved_input = await resolve_product_input(input_text, AMAZON_DOMAIN)
-        stype = resolved_input.seller_type if resolved_input else "NEW_AMAZON"
-        curl = resolved_input.clean_url if resolved_input else None
+    # Attempt 2: Unified authoritative fallback (fetch_product) if Creators API direct offer is unavailable/missing
+    if not valid_offer_found:
+        fallback_triggered = True
+        try:
+            coupon_enabled = db.get_coupon_detection_enabled() if db else False
+            prod_res = await fetch_product(
+                db,
+                browser,
+                asin,
+                curl,
+                f"single_check_{asin}",
+                coupon_enabled=coupon_enabled,
+                seller_type=stype,
+            )
+            if (
+                prod_res
+                and prod_res.get("seller_offer_available") is True
+                and prod_res.get("price")
+                and prod_res.get("price") != "Not found"
+                and _valid_price(prod_res.get("price"))
+            ):
+                val = parse_price_number(prod_res["price"])
+                if val and val > 0:
+                    valid_offer_found = True
+                    valid_price_txt = prod_res["price"]
+                    valid_price_val = val
+                    list_txt = prod_res.get("list_price")
+                    list_val = parse_price_number(list_txt) if list_txt else None
+                    seller_name = prod_res.get("seller_name")
+                    if prod_res.get("title") and prod_res.get("title") != "Not found":
+                        title = str(prod_res["title"])
+                    fetch_source = prod_res.get("data_source", "fetch_product")
+                    rejection_reason = f"Valid offer resolved via authoritative fallback ({fetch_source})"
+        except Exception as exc:
+            logger.debug("Unified fetch_product fallback failed asin=%s error=%s", asin, exc)
 
-        db.add_published_product(
-            asin=asin,
-            title=title,
-            source_channel_id=0,
-            destination_message_id=0,
-            published_price=new_price_txt,
-            published_price_value=new_price_val,
-            published_currency="EGP",
-            seller_type=stype,
-            clean_url=curl,
-        )
-        product = db.get_published_product_by_asin(asin)
-    else:
-        logger.debug("PRICE MONITOR → SINGLE CHECK DATABASE HIT asin=%s", asin)
-        product = row
+    # Log diagnostic evidence required for monitoring price resolution
+    logger.info(
+        "PM RESOLUTION:\n"
+        "  asin=%s\n"
+        "  seller_type=%s\n"
+        "  merchant_id=%s\n"
+        "  source=%s\n"
+        "  api_price=%s\n"
+        "  api_availability=%s\n"
+        "  fallback=%s\n"
+        "  resolved_price=%s\n"
+        "  validation=%s\n"
+        "  reason=%s",
+        asin,
+        stype,
+        target_merchant_id,
+        fetch_source,
+        api_price,
+        api_availability,
+        "TRIGGERED" if fallback_triggered else "N/A",
+        valid_price_txt,
+        "PASS" if valid_offer_found else "FAIL",
+        rejection_reason,
+    )
 
-    if not product:
+    if not valid_offer_found:
+        logger.warning("ASIN SEARCH ABORTED — Product price unavailable or untrustworthy asin=%s", asin)
         return {
             "success": False,
-            "error": "db_error",
-            "message": "❌ Failed to load product from database.",
+            "error": "price_unavailable",
+            "message": "❌ المنتج غير متوفر حالياً أو لا يمكن الحصول على سعر موثوق له.",
         }
+
+    title = title or (str(item.title) if (item and getattr(item, "title", None) and item.title != "Not found") else f"Amazon Product ({asin})")
+
+    # Ensure item dict exists for downstream evaluation if resolved via fallback
+    if not isinstance(item, dict) or stype not in item:
+        item_dict = {
+            stype: {
+                "merchant_id": target_merchant_id,
+                "price": valid_price_val,
+                "availability": "IN_STOCK",
+                "merchant_name": seller_name or ("Amazon.eg" if stype == "NEW_AMAZON" else "Amazon Resale"),
+            },
+            "title": title,
+        }
+        item = item_dict
+
+    # Idempotent Find-or-Create Radar Product (Atomic DB transaction)
+    product, is_new = db.find_or_create_radar_product(
+        asin=asin,
+        title=title,
+        price_text=valid_price_txt,
+        price_value=valid_price_val,
+        clean_url=curl,
+        seller_type=stype,
+    )
+    existing_product = not is_new
+
+    # Record price history if initial or changed
+    db.record_price_history_if_changed(
+        asin=asin,
+        seller_type=stype,
+        price_text=valid_price_txt,
+        price_value=valid_price_val,
+        tracked_product_id=product["id"],
+        availability="AVAILABLE",
+        list_text=list_txt,
+        list_val=list_val,
+        seller_name=seller_name,
+    )
 
     bulk_history = db.get_bulk_latest_price_history([asin])
     eval_res = await evaluate_product_price_check(db, product, item, bulk_history, min_drop=1.0)
 
-    # Commit DB updates
+    # Commit DB updates from evaluation
     if eval_res["product_check_updates"] or eval_res["seller_state_updates"] or eval_res["history_records"]:
         db.execute_bulk_monitoring_db_updates(
             eval_res["product_check_updates"],
@@ -1037,19 +1225,19 @@ async def run_single_product_price_check(db: Database, input_text: str) -> dict[
 
     # Log required diagnostic steps
     seller_evals = eval_res.get("seller_evaluations", {})
-    for stype, sid in [("NEW_AMAZON", NEW_AMAZON_SELLER_ID), ("AMAZON_RESALE", AMAZON_RESALE_SELLER_ID)]:
-        seval = seller_evals.get(stype, {})
+    for seller_t, sid in [("NEW_AMAZON", NEW_AMAZON_SELLER_ID), ("AMAZON_RESALE", AMAZON_RESALE_SELLER_ID)]:
+        seval = seller_evals.get(seller_t, {})
         status = seval.get("status", "UNKNOWN")
         curr_price = seval.get("curr_final")
         logger.debug(
             "PRICE MONITOR → SINGLE CHECK %s merchant_id=%s price=%s availability=%s",
-            stype,
+            seller_t,
             sid,
             curr_price,
             status,
         )
         if seval.get("is_baseline"):
-            logger.debug("PRICE MONITOR → SINGLE CHECK BASELINE CREATED seller_type=%s", stype)
+            logger.debug("PRICE MONITOR → SINGLE CHECK BASELINE CREATED seller_type=%s", seller_t)
 
     logger.debug("PRICE MONITOR → SINGLE CHECK COMPLETE asin=%s added_to_monitoring=True", asin)
 
@@ -1283,11 +1471,15 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
                             count_429 += 1
                         retry_after = getattr(exc, "retry_after", None)
                         limiter = getattr(client, "rate_limiter", None) or getattr(client, "_monitoring_limiter", None)
+                        rem = 0.0
                         if limiter and hasattr(limiter, "get_cooldown_remaining"):
-                            rem = limiter.get_cooldown_remaining()
-                            cooldown_sec = rem if rem > 0 else (retry_after if (retry_after is not None and retry_after > 0) else 2.0)
-                        else:
-                            cooldown_sec = retry_after if (retry_after is not None and retry_after > 0) else 2.0
+                            try:
+                                val = limiter.get_cooldown_remaining()
+                                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                                    rem = float(val)
+                            except Exception:
+                                pass
+                        cooldown_sec = rem if rem > 0 else (retry_after if (retry_after is not None and retry_after > 0) else 2.0)
 
                         if attempt < max_attempts:
                             async with _metrics_lock:
@@ -1530,20 +1722,10 @@ async def run_price_check(application: Any, admin_chat_id: int | str | None = No
     t_stage10_start = time.monotonic()
     if notifications:
         for notif in notifications:
-            reply_markup = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "📢 Republish",
-                            callback_data=f"{CB_REPUBLISH}{notif['published_id']}",
-                        ),
-                        InlineKeyboardButton(
-                            "📊 Price History",
-                            callback_data=f"{CB_PRICE_HISTORY_VIEW}{notif['asin']}",
-                        ),
-                    ]
-                ]
-            )
+            reply_markup = notif.get("reply_markup")
+            if not reply_markup:
+                prod_row = notif.get("product") or db.get_published_product(notif["published_id"])
+                reply_markup = _build_pm_keyboard(notif["published_id"], prod_row or {})
             sent = await _safe_send_message(
                 bot,
                 admin_chat_id,
@@ -2266,8 +2448,19 @@ async def handle_price_chart_view(
         return
 
     product_title = (p_row.get("title") if p_row else None) or asin
+    orig_pub_val = None
+    if hasattr(db, "get_original_publishing_price"):
+        res = db.get_original_publishing_price(published_id=published_id, asin=asin)
+        if isinstance(res, (tuple, list)) and len(res) >= 1:
+            orig_pub_val = res[0]
+    if orig_pub_val is None and p_row and p_row.get("original_published_price_value"):
+        try:
+            orig_pub_val = float(p_row["original_published_price_value"])
+        except (ValueError, TypeError):
+            pass
+
     try:
-        chart_path = generate_price_chart_image(asin, product_title, records)
+        chart_path = generate_price_chart_image(asin, product_title, records, original_publishing_price=orig_pub_val)
         if not chart_path or not os.path.exists(chart_path):
             raise RuntimeError("Chart image generation returned empty path")
     except Exception as exc:
@@ -2326,4 +2519,560 @@ def build_price_monitoring_handlers() -> list:
             handle_price_chart_view,
             pattern=r"^ph_chart:.+$",
         ),
+        # Interactive product-monitoring message handlers
+        CallbackQueryHandler(
+            handle_pm_publish,
+            pattern=r"^pm_publish:\d+$",
+        ),
+        CallbackQueryHandler(
+            handle_pm_history,
+            pattern=r"^pm_history:\d+$",
+        ),
+        CallbackQueryHandler(
+            handle_pm_refresh,
+            pattern=r"^pm_refresh:\d+$",
+        ),
+        CallbackQueryHandler(
+            handle_pm_back,
+            pattern=r"^pm_back:\d+$",
+        ),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Interactive product-monitoring message — single-message admin dashboard
+# ---------------------------------------------------------------------------
+
+
+def _get_current_price_value(product: dict[str, Any]) -> float:
+    """Extract the current price for the product's seller type.
+
+    Uses the seller-type-specific last valid price, falling back to
+    ``last_price_check`` if unavailable.
+    """
+    if product.get("current_price_value") is not None:
+        try:
+            return float(product["current_price_value"])
+        except (ValueError, TypeError):
+            pass
+    seller_type = product.get("seller_type") or "NEW_AMAZON"
+    if seller_type == "AMAZON_RESALE":
+        val = product.get("resale_last_valid_price") or product.get("last_price_check")
+    else:
+        val = product.get("new_last_valid_price") or product.get("last_price_check")
+    if val is not None:
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            pass
+    if product.get("current_price") is not None:
+        try:
+            return float(product["current_price"])
+        except (ValueError, TypeError):
+            pass
+    return 0.0
+
+
+def _format_pm_availability(product: dict[str, Any]) -> str:
+    """Format availability text from a published_products row."""
+    seller_type = product.get("seller_type") or "NEW_AMAZON"
+    if seller_type == "AMAZON_RESALE":
+        avail = product.get("resale_availability")
+        qty = product.get("resale_quantity") or product.get("quantity")
+    else:
+        avail = product.get("new_availability")
+        qty = product.get("new_quantity") or product.get("quantity")
+
+    if not avail or str(avail).upper() in ("UNKNOWN", "NONE", ""):
+        return "📦 التوفر غير معروف"
+
+    avail_upper = str(avail).upper()
+    if avail_upper in ("OUT_OF_STOCK", "MISSING_MERCHANT", "UNAVAILABLE"):
+        return "❌ غير متوفر حاليًا"
+
+    if qty is not None:
+        try:
+            qty_int = int(qty)
+            if qty_int == 1:
+                return "⚠️ متبقي قطعة واحدة"
+            if qty_int > 1:
+                return "📦 متوفر — أكتر من قطعة"
+        except (ValueError, TypeError):
+            pass
+
+    if avail_upper == "AVAILABLE":
+        return "📦 متوفر — أكتر من قطعة"
+
+    return "📦 التوفر غير معروف"
+
+
+def format_pm_product_message(
+    product: dict[str, Any],
+    stats: dict[str, Any],
+    currency: str = "EGP",
+    db: Database | None = None,
+) -> str:
+    """Format the main interactive product-monitoring message text."""
+    title = short_title(product.get("title") or "Unknown", 80)
+    asin = product.get("asin") or "?"
+
+    # Authoritative publishing price: original price at time of first publish
+    published_value: float | None = None
+    if product.get("original_published_price_value") is not None and float(product["original_published_price_value"]) > 0:
+        published_value = float(product["original_published_price_value"])
+
+    if (published_value is None or published_value <= 0) and db is not None:
+        orig_val, orig_txt, orig_curr = db.get_original_publishing_price(
+            published_id=product.get("id"), asin=asin
+        )
+        if orig_val is not None and orig_val > 0:
+            published_value = orig_val
+            if orig_curr:
+                currency = orig_curr
+
+    # Current price — latest successfully fetched price for seller type
+    current_value = _get_current_price_value(product)
+    prev_price = stats.get("previous_price") if stats else None
+    avail_text = _format_pm_availability(product)
+
+    return format_detailed_price_drop_message(
+        title=title,
+        current_price=current_value,
+        previous_price=prev_price,
+        currency=currency,
+        stats=stats,
+        original_publishing_price=published_value,
+        asin=asin,
+        availability=avail_text,
+    )
+
+
+def format_pm_history_message(
+    product: dict[str, Any],
+    records: list[dict[str, Any]],
+    stats: dict[str, Any],
+    currency: str = "EGP",
+) -> str:
+    """Format the price-history view for the interactive monitoring message."""
+    asin = product.get("asin") or "?"
+    title = short_title(product.get("title") or "Unknown", 60)
+
+    lines: list[str] = [f"📊 <b>سجل الأسعار — {html_escape(title)}</b>\n"]
+
+    if not records or not stats.get("has_data"):
+        lines.append("لا يوجد سجل أسعار مسجل حتى الآن.")
+        return "\n".join(lines)
+
+    lowest_price = stats.get("lowest_price") or 0.0
+
+    for r in records:
+        raw_dt = r.get("recorded_at") or ""
+        try:
+            dt = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
+            date_str = dt.strftime("%d/%m/%Y")
+        except Exception:
+            date_str = raw_dt[:10] if raw_dt else "غير متوفر"
+
+        final_price = float(r.get("final_price") or 0)
+        if final_price <= 0:
+            continue
+
+        price_str = format_currency_amount(final_price, currency)
+        trophy = " 🏆" if (lowest_price > 0 and abs(final_price - lowest_price) < 0.01) else ""
+        lines.append(f"• {date_str} — {price_str}{trophy}")
+
+    lines.append("\n━━━━━━━━━━━━━━\n")
+
+    if lowest_price > 0:
+        lines.append(f"📉 <b>أقل سعر مسجل:</b> {format_currency_amount(lowest_price, currency)}")
+        lowest_at = stats.get("lowest_recorded_at")
+        if lowest_at:
+            try:
+                dt = datetime.fromisoformat(lowest_at.replace("Z", "+00:00"))
+                lines.append(f"📅 <b>تاريخ أقل سعر:</b> {dt.strftime('%d/%m/%Y')}")
+            except Exception:
+                lines.append(f"📅 <b>تاريخ أقل سعر:</b> {lowest_at[:10]}")
+
+    current_value = _get_current_price_value(product)
+
+    if current_value > 0:
+        lines.append(f"💰 <b>السعر الحالي:</b> {format_currency_amount(current_value, currency)}")
+
+    return "\n".join(lines)
+
+
+def _build_pm_history_keyboard(published_id: int) -> InlineKeyboardMarkup:
+    """Build the back button for the price-history view."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🔙 رجوع للمنتج",
+                    callback_data=f"{CB_PM_BACK}{published_id}",
+                ),
+            ]
+        ]
+    )
+
+
+def _build_pm_publish_result_keyboard(
+    published_id: int, success: bool
+) -> InlineKeyboardMarkup:
+    """Build buttons shown after a publish attempt."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if not success:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🔄 إعادة المحاولة",
+                    callback_data=f"{CB_PM_PUBLISH}{published_id}",
+                ),
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🔙 رجوع للمنتج",
+                callback_data=f"{CB_PM_BACK}{published_id}",
+            ),
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+def _get_pm_product_data(
+    db: Database, published_id: int
+) -> tuple[dict[str, Any] | None, dict[str, Any], str]:
+    """Fetch product row, stats, and currency for a pm_ callback."""
+    product = db.get_published_product(published_id)
+    if not product:
+        return None, {"has_data": False}, "EGP"
+
+    asin = product.get("asin") or ""
+    seller_type = product.get("seller_type") or "NEW_AMAZON"
+    currency = product.get("published_currency") or "EGP"
+
+    if hasattr(db, "get_original_publishing_price"):
+        orig_val, orig_txt, orig_curr = db.get_original_publishing_price(
+            published_id=published_id, asin=asin
+        )
+        if orig_val is not None and orig_val > 0:
+            product["original_published_price_value"] = orig_val
+            if orig_txt:
+                product["original_published_price"] = orig_txt
+        else:
+            product["original_published_price_value"] = None
+            product["original_published_price"] = None
+        if orig_curr:
+            currency = orig_curr
+            product["published_currency"] = orig_curr
+
+    stats = db.get_price_history_stats(asin, seller_type=seller_type)
+    return product, stats, currency
+
+
+async def send_product_monitoring_message(
+    bot: Bot,
+    chat_id: int | str,
+    published_id: int,
+    db: Database,
+) -> bool:
+    """Send a new interactive product-monitoring message to the admin chat.
+
+    This is the public entry point — call from notifications or admin commands.
+    Returns True if the message was sent successfully.
+    """
+    product, stats, currency = _get_pm_product_data(db, published_id)
+    if not product:
+        return False
+
+    text = format_pm_product_message(product, stats, currency, db=db)
+    keyboard = _build_pm_keyboard(published_id, product)
+
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "PM MESSAGE SEND FAILED chat_id=%s published_id=%s error=%s",
+            chat_id,
+            published_id,
+            exc,
+        )
+        return False
+
+
+async def handle_pm_publish(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle the Publish Now button in the interactive monitoring message."""
+    query = update.callback_query
+    user = update.effective_user
+    if not is_admin(user.id if user else None):
+        await query.answer("Unauthorized", show_alert=True)
+        return
+
+    published_id = int((query.data or "").replace(CB_PM_PUBLISH, ""))
+    # IMMEDIATELY acknowledge the callback — do NOT wait for the publish op
+    await query.answer("جاري النشر…")
+
+    lock = _get_pm_publish_lock(published_id)
+
+    # Non-blocking acquire: reject immediately if another publish is running
+    if lock.locked():
+        try:
+            await query.edit_message_text(
+                "⏳ عملية النشر قيد التنفيذ بالفعل…",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    # Acquire BEFORE any await so no other coroutine can sneak in
+    await lock.acquire()
+    try:
+        try:
+            await query.edit_message_text(
+                "⏳ جاري النشر…",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+        try:
+            status = await republish_published_product(context.application, published_id)
+            success = status.startswith("✅")
+            result_text = f"✅ تم النشر بنجاح\n\n{status}" if success else f"❌ فشل النشر\n\n{status}"
+            try:
+                await query.edit_message_text(
+                    result_text,
+                    reply_markup=_build_pm_publish_result_keyboard(published_id, success),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        except Exception:
+            logger.exception("PM PUBLISH FAILED published_id=%s", published_id)
+            try:
+                await query.edit_message_text(
+                    "❌ فشل النشر — حدث خطأ غير متوقع.",
+                    reply_markup=_build_pm_publish_result_keyboard(published_id, False),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+    finally:
+        lock.release()
+
+
+async def handle_pm_history(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show price history with chart image, Arabic caption, and back button."""
+    query = update.callback_query
+    user = update.effective_user
+    if not is_admin(user.id if user else None):
+        await query.answer("غير مصرح لك", show_alert=True)
+        return
+
+    published_id = int((query.data or "").replace(CB_PM_HISTORY, ""))
+    await query.answer("جاري تحميل الرسم البياني وسجل الأسعار…")
+
+    db = _db(context)
+    product, stats, currency = _get_pm_product_data(db, published_id)
+    if not product:
+        if query.message and getattr(query.message, "photo", None):
+            await query.message.reply_text("❌ لم يتم العثور على المنتج.", parse_mode="HTML")
+        else:
+            await query.edit_message_text(
+                "❌ لم يتم العثور على المنتج.",
+                parse_mode="HTML",
+            )
+        return
+
+    asin = product.get("asin") or ""
+    seller_type = product.get("seller_type") or "NEW_AMAZON"
+    records = db.get_price_history_records(asin, seller_type=seller_type, limit=100)
+
+    caption_text = format_pm_history_message(product, records, stats, currency)
+    keyboard = _build_pm_history_keyboard(published_id)
+
+    valid_prices = []
+    for r in (records or []):
+        try:
+            p = float(r.get("final_price") or 0.0)
+            if p > 0:
+                valid_prices.append(p)
+        except (ValueError, TypeError):
+            pass
+
+    chart_path = None
+    if records and len(records) >= 2 and valid_prices:
+        product_title = product.get("title") or asin
+        orig_pub_val = None
+        if hasattr(db, "get_original_publishing_price"):
+            res = db.get_original_publishing_price(published_id=published_id, asin=asin)
+            if isinstance(res, (tuple, list)) and len(res) >= 1:
+                orig_pub_val = res[0]
+        if orig_pub_val is None and product.get("original_published_price_value"):
+            try:
+                orig_pub_val = float(product["original_published_price_value"])
+            except (ValueError, TypeError):
+                pass
+
+        try:
+            chart_path = generate_price_chart_image(
+                asin,
+                product_title,
+                records,
+                original_publishing_price=orig_pub_val,
+            )
+        except Exception as exc:
+            logger.error("PM HISTORY CHART ERROR asin=%s exc=%s", asin, exc, exc_info=True)
+
+    if chart_path and os.path.exists(chart_path):
+        try:
+            with open(chart_path, "rb") as photo:
+                await query.message.reply_photo(
+                    photo=photo,
+                    caption=caption_text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                )
+        finally:
+            cleanup_files([chart_path])
+    else:
+        has_photo = bool(query.message and isinstance(getattr(query.message, "photo", None), (list, tuple)) and query.message.photo)
+        if has_photo:
+            await query.message.reply_text(
+                caption_text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        else:
+            await query.edit_message_text(
+                caption_text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+
+
+async def handle_pm_refresh(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Refresh product data and update the message."""
+    query = update.callback_query
+    user = update.effective_user
+    if not is_admin(user.id if user else None):
+        await query.answer("غير مصرح لك", show_alert=True)
+        return
+
+    published_id = int((query.data or "").replace(CB_PM_REFRESH, ""))
+    await query.answer("جاري التحديث…")
+
+    db = _db(context)
+    product = db.get_published_product(published_id)
+    if not product:
+        await query.edit_message_text(
+            "❌ لم يتم العثور على المنتج.",
+            parse_mode="HTML",
+        )
+        return
+
+    asin = product.get("asin") or ""
+    browser = context.bot_data.get("browser") if context and hasattr(context, "bot_data") else None
+
+    # Run a single product price check to get fresh data from the API
+    try:
+        result = await run_single_product_price_check(db, asin, browser=browser)
+        if not result.get("success"):
+            logger.warning(
+                "PM REFRESH FAILED asin=%s error=%s",
+                asin,
+                result.get("message"),
+            )
+    except Exception:
+        logger.exception("PM REFRESH ERROR asin=%s", asin)
+
+    # Re-fetch product data after the check (it may have updated DB)
+    product, stats, currency = _get_pm_product_data(db, published_id)
+    if not product:
+        await query.edit_message_text(
+            "❌ لم يتم العثور على المنتج بعد التحديث.",
+            parse_mode="HTML",
+        )
+        return
+
+    text = format_pm_product_message(product, stats, currency, db=db)
+    keyboard = _build_pm_keyboard(published_id, product)
+
+    has_photo = bool(query.message and isinstance(getattr(query.message, "photo", None), (list, tuple)) and query.message.photo)
+    if has_photo:
+        await query.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+    else:
+        await query.edit_message_text(
+            text,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+
+
+async def handle_pm_back(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Restore the product-monitoring view."""
+    query = update.callback_query
+    user = update.effective_user
+    if not is_admin(user.id if user else None):
+        await query.answer("غير مصرح لك", show_alert=True)
+        return
+
+    published_id = int((query.data or "").replace(CB_PM_BACK, ""))
+    await query.answer()
+
+    db = _db(context)
+    product, stats, currency = _get_pm_product_data(db, published_id)
+
+    has_photo = bool(query.message and isinstance(getattr(query.message, "photo", None), (list, tuple)) and query.message.photo)
+
+    if not product:
+        if has_photo:
+            await query.message.reply_text("❌ لم يتم العثور على المنتج.", parse_mode="HTML")
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+        else:
+            await query.edit_message_text(
+                "❌ لم يتم العثور على المنتج.",
+                parse_mode="HTML",
+            )
+        return
+
+    text = format_pm_product_message(product, stats, currency, db=db)
+    keyboard = _build_pm_keyboard(published_id, product)
+
+    if has_photo:
+        await query.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+    else:
+        await query.edit_message_text(
+            text,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+

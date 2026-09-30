@@ -2770,9 +2770,10 @@ async def receive_single_product_check(update: Update, context: ContextTypes.DEF
         return ConversationHandler.END
 
     db = _db(context)
+    browser = context.bot_data.get("browser") if context and hasattr(context, "bot_data") else None
     wait_msg = await update.message.reply_text("🔎 Checking product, please wait...")
 
-    result = await run_single_product_price_check(db, text)
+    result = await run_single_product_price_check(db, text, browser=browser)
 
     try:
         await wait_msg.delete()
