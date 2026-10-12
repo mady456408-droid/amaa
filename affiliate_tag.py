@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Final
+from typing import Any, Final
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,20 @@ def set_affiliate_settings(enabled: bool, value: str) -> None:
     global _TAG_ENABLED, _TAG_VALUE
     _TAG_ENABLED = bool(enabled)
     _TAG_VALUE = (value or "").strip()
+
+
+def get_default_affiliate_tag(db: Any = None) -> str:
+    """Return the bot's configured default Amazon Associates affiliate tag."""
+    if db is not None and hasattr(db, "get_affiliate_tag_value"):
+        try:
+            db_tag = (db.get_affiliate_tag_value() or "").strip()
+            if db_tag:
+                return db_tag
+        except Exception:
+            pass
+    if _TAG_VALUE:
+        return _TAG_VALUE
+    return (getattr(config, "CREATORS_PARTNER_TAG", "") or "").strip()
 
 
 def is_valid_affiliate_tag(value: str) -> bool:

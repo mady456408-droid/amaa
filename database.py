@@ -1254,6 +1254,8 @@ class Database:
                     GROUP BY asin
                 ) latest ON p.asin = latest.asin AND p.published_at = latest.max_at
                 WHERE COALESCE(p.is_active, 1) = 1
+                  AND p.asin NOT LIKE 'SEARCH:%'
+                  AND p.asin NOT LIKE 'PROMO:%'
                 ORDER BY 
                     CASE WHEN p.last_checked_at IS NULL THEN 0 ELSE 1 END ASC,
                     p.last_checked_at ASC,

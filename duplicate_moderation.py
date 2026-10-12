@@ -69,13 +69,21 @@ async def send_approval_request(
             list_price_text=list_price,
         )
         price_line = f"{html_escape(price_display)}\n\n"
+    display_link_str = apply_affiliate_tag(build_clean_url(asin, AMAZON_DOMAIN))
+    if str(asin).upper().startswith(("SEARCH:", "PROMO:")) and hasattr(db, "get_pending_approval"):
+        try:
+            pending_row = db.get_pending_approval(pending_id)
+            if pending_row and pending_row.get("clean_url"):
+                display_link_str = pending_row["clean_url"]
+        except Exception:
+            pass
     text = (
         "⚠️ <b>Duplicate Product Detected</b>\n\n"
         f"{title_line}"
         f"ASIN: <code>{asin}</code>\n"
         f"Source Channel: {name}\n\n"
         f"{price_line}"
-        f"🔗 Display link: <code>{html_escape(apply_affiliate_tag(build_clean_url(asin, AMAZON_DOMAIN)))}</code>\n\n"
+        f"🔗 Display link: <code>{html_escape(display_link_str)}</code>\n\n"
         "This ASIN was published recently.\n\n"
         "Publish anyway?"
     )
@@ -122,7 +130,7 @@ async def publish_and_record(
 
     db = application.bot_data["db"]
     caption = pending["caption"]
-    if pending.get("price") and pending["price"] != "Not found":
+    if pending.get("price") and pending["price"] not in ("Not found", "SEARCH", "PROMOTION", "PROMOTION_EXPIRED"):
         coupon = pending.get("coupon")
         if not db.get_coupon_detection_enabled():
             coupon = None

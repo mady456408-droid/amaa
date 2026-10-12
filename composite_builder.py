@@ -21,9 +21,9 @@ def _valid_price(text: str | None) -> bool:
     return bool(text) and text.strip() != "Not found"
 
 
-async def resolve_asin_from_url(item: str) -> tuple[str, str] | None:
+async def resolve_asin_from_url(item: str, *, browser=None) -> tuple[str, str] | None:
     """Return (asin, clean_url) from URL, redirect URL, or plain ASIN using central resolver."""
-    resolved = await resolve_product_input(item, AMAZON_DOMAIN)
+    resolved = await resolve_product_input(item, AMAZON_DOMAIN, browser=browser)
     if not resolved:
         return None
     return resolved.asin, resolved.clean_url
@@ -60,7 +60,7 @@ async def fetch_composite_entries(
         resolved_pairs: list[tuple[str, str]] = []
         for index, url in enumerate(urls[:_COMPOSITE_MAX_PRODUCTS], start=1):
             try:
-                resolved = await resolve_asin_from_url(url)
+                resolved = await resolve_asin_from_url(url, browser=browser)
                 if not resolved:
                     logger.warning(
                         "Composite entry #%d skipped — URL resolution failed: %s", index, url

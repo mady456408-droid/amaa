@@ -28,6 +28,7 @@ from link_resolver import (
     is_http_url,
     is_manual_post_input,
     is_standalone_asin,
+    resolve_and_classify_url,
     resolve_product_input,
     resolve_redirect,
 )
@@ -53,6 +54,25 @@ from upload_prep import prepare_channel_upload
 from coupon_price import coupon_apply_kwargs_from_product, normalize_caption_price_line
 from inline_buttons import build_inline_keyboard
 from published_price import extract_published_price_fields
+from promotion_handler import (
+    InvalidPromotionUrlError,
+    PromotionError,
+    PromotionNavigationError,
+    PromotionScreenshotError,
+    is_promotion_url,
+    process_promotion_url,
+)
+from search_handler import (
+    MAX_INLINE_BUTTON_URL_BYTES,
+    InvalidSearchUrlError,
+    SearchEmptyResultsError,
+    SearchError,
+    SearchNavigationError,
+    SearchScreenshotError,
+    is_search_url,
+    normalize_search_url,
+    process_search_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +145,25 @@ def build_preview_caption(draft: dict, *, duplicate: bool) -> str:
     return header + draft["caption"]
 
 
+def _is_promotion_draft(draft: dict) -> bool:
+    return (
+        draft.get("seller_type") == "PROMOTION"
+        or (draft.get("asin") or "").upper().startswith("PROMO:")
+        or (draft.get("price") or "").upper().startswith("PROMOTION")
+    )
+
+
+def _is_search_draft(draft: dict) -> bool:
+    return (
+        draft.get("seller_type") == "SEARCH"
+        or (draft.get("asin") or "").upper().startswith("SEARCH:")
+        or (draft.get("price") or "").upper() == "SEARCH"
+    )
+
+
 def _draft_asins(draft: dict) -> list[str]:
+    if _is_promotion_draft(draft):
+        return []
     return [
         part.strip().upper()
         for part in (draft.get("asin") or "").split(",")
@@ -134,6 +172,8 @@ def _draft_asins(draft: dict) -> list[str]:
 
 
 def _is_duplicate_draft(db: Database, draft: dict) -> bool:
+    if _is_promotion_draft(draft):
+        return False
     return any(
         db.is_asin_in_last_published(asin, LAST_PUBLISHED_LOOKBACK)
         for asin in _draft_asins(draft)
@@ -141,6 +181,8 @@ def _is_duplicate_draft(db: Database, draft: dict) -> bool:
 
 
 def _should_use_composite(inputs: list[str]) -> bool:
+    if any(is_promotion_url(item) or is_search_url(item) for item in inputs):
+        return False
     return FRAME_PRODUCT_IMAGES and 2 <= len(inputs) <= get_composite_max_products()
 
 
@@ -174,37 +216,13 @@ async def _build_product_caption_from_data(
 
 
 async def resolve_asin_from_input(item: str) -> tuple[str, str] | None:
-    """Return (asin, clean_url) from URL, redirect URL, or bare ASIN."""
+    """Return (asin, clean_url) from URL, redirect URL, or bare ASIN via central resolver."""
     logger.info("MANUAL INPUT RECEIVED: %s", item)
-
-    bare = is_standalone_asin(item)
-    if bare:
-        logger.info("ASIN EXTRACTED: %s", bare)
-        return bare, build_clean_url(bare, AMAZON_DOMAIN)
-
-    if not is_http_url(item):
-        logger.warning("Invalid manual input — not ASIN or URL: %r", item)
+    resolved = await resolve_product_input(item, AMAZON_DOMAIN)
+    if not resolved:
         return None
-
-    original = item.strip()
-    try:
-        final_url = await resolve_redirect(original)
-    except Exception:
-        logger.exception("REDIRECT RESOLVED: %s -> failed", original)
-        return None
-
-    logger.info("REDIRECT RESOLVED: %s -> %s", original, final_url)
-
-    if is_amazon_url(final_url):
-        logger.info("AMAZON URL VALIDATED")
-
-    asin = extract_asin(final_url)
-    if not asin:
-        logger.warning("ASIN extraction failed after redirect: %s", final_url)
-        return None
-
-    logger.info("ASIN EXTRACTED: %s", asin)
-    return asin, build_clean_url(asin, AMAZON_DOMAIN)
+    logger.info("ASIN EXTRACTED: %s", resolved.asin)
+    return resolved.asin, resolved.clean_url
 
 
 async def prepare_composite_draft_from_inputs(
@@ -265,6 +283,128 @@ async def prepare_composite_draft_from_inputs(
     return draft, composite_path
 
 
+async def prepare_promotion_draft_from_input(
+    application,
+    admin_id: int,
+    item: str,
+    *,
+    scrape_key: str,
+) -> tuple[dict, str] | None:
+    """Process an Amazon promotion URL and create a draft row.
+
+    Raises PromotionError subclasses so the caller can report the exact cause.
+    """
+    db = application.bot_data["db"]
+    browser = application.bot_data["browser"]
+    held_image: str | None = None
+
+    promo_data = await process_promotion_url(
+        browser,
+        db,
+        item,
+        scrape_key=scrape_key,
+        domain=AMAZON_DOMAIN,
+    )
+    screenshot_path = promo_data.get("screenshot")
+    if not screenshot_path or not os.path.exists(screenshot_path):
+        raise PromotionScreenshotError(
+            "Promotion screenshot missing after capture"
+        )
+
+    held_image = screenshot_path
+    try:
+        promo_id = promo_data["promotion_id"]
+        draft_asin = f"PROMO:{promo_id}"
+        price_marker = (
+            "PROMOTION_EXPIRED" if promo_data.get("is_expired") else "PROMOTION"
+        )
+        draft_id = db.create_draft_post(
+            asin=draft_asin,
+            title=promo_data["title"],
+            price=price_marker,
+            clean_url=promo_data["short_url"],
+            caption=promo_data["caption"],
+            image_path=held_image,
+            created_by=admin_id,
+            coupon=None,
+            list_price=None,
+            seller_type="NEW_AMAZON",
+        )
+        draft = db.get_draft_post(draft_id)
+        logger.info(
+            "PROMOTION DRAFT CREATED draft_id=%s promo_id=%s is_expired=%s title_missing=%s",
+            draft_id,
+            promo_id,
+            promo_data.get("is_expired"),
+            promo_data.get("title_missing"),
+        )
+        logger.info("DRAFT IMAGE RETAINED path=%s", held_image)
+        return draft, held_image
+    except Exception:
+        if held_image:
+            cleanup_files([held_image])
+        raise
+
+
+async def prepare_search_draft_from_input(
+    application,
+    admin_id: int,
+    item: str,
+    *,
+    scrape_key: str,
+) -> tuple[dict, str] | None:
+    """Process an Amazon search-results URL and create a draft row.
+
+    Raises SearchError subclasses so the caller can report the exact cause.
+    """
+    db = application.bot_data["db"]
+    browser = application.bot_data["browser"]
+    held_image: str | None = None
+
+    search_data = await process_search_url(
+        browser,
+        db,
+        item,
+        scrape_key=scrape_key,
+        domain=AMAZON_DOMAIN,
+    )
+    screenshot_path = search_data.get("screenshot")
+    if not screenshot_path or not os.path.exists(screenshot_path):
+        raise SearchScreenshotError(
+            "Search screenshot missing after capture"
+        )
+
+    held_image = screenshot_path
+    try:
+        search_key = search_data["search_key"]
+        draft_id = db.create_draft_post(
+            asin=search_key,
+            title=search_data["title"],
+            price="SEARCH",
+            clean_url=search_data["affiliate_url"],
+            caption=search_data["caption"],
+            image_path=held_image,
+            created_by=admin_id,
+            coupon=None,
+            list_price=None,
+            seller_type="NEW_AMAZON",
+        )
+        draft = db.get_draft_post(draft_id)
+        logger.info(
+            "SEARCH DRAFT CREATED draft_id=%s search_key=%s result_count=%s affiliate_url=%s",
+            draft_id,
+            search_key,
+            search_data.get("result_count"),
+            search_data.get("affiliate_url"),
+        )
+        logger.info("DRAFT IMAGE RETAINED path=%s", held_image)
+        return draft, held_image
+    except Exception:
+        if held_image:
+            cleanup_files([held_image])
+        raise
+
+
 async def prepare_draft_from_input(
     application,
     admin_id: int,
@@ -272,16 +412,46 @@ async def prepare_draft_from_input(
     *,
     scrape_key: str,
 ) -> tuple[dict, str] | None:
-    """Scrape and create draft row. Returns (draft, screenshot_path) or None on failure."""
+    """Scrape and create draft row using Resolve-First, Classify-Second. Returns (draft, screenshot_path) or None."""
     db = application.bot_data["db"]
-    browser = application.bot_data["browser"]
+    browser = application.bot_data.get("browser")
+
+    classified = await resolve_and_classify_url(
+        item,
+        domain=AMAZON_DOMAIN,
+        browser=browser,
+    )
+
+    if classified.destination_type == "promotion" and classified.resolved_url:
+        return await prepare_promotion_draft_from_input(
+            application,
+            admin_id,
+            classified.resolved_url,
+            scrape_key=scrape_key,
+        )
+
+    if classified.destination_type == "search" and classified.resolved_url:
+        return await prepare_search_draft_from_input(
+            application,
+            admin_id,
+            classified.resolved_url,
+            scrape_key=scrape_key,
+        )
+
+    if classified.destination_type != "product" or not classified.product_resolution:
+        logger.warning(
+            "MANUAL DRAFT SKIPPED — destination_type=%s reason=%s input=%r",
+            classified.destination_type,
+            classified.error_reason,
+            item,
+        )
+        return None
+
     temp_files: list[str] = []
     held_image: str | None = None
 
     try:
-        resolved = await resolve_product_input(item, AMAZON_DOMAIN)
-        if not resolved:
-            return None
+        resolved = classified.product_resolution
 
         asin = resolved.asin
         clean_url = resolved.clean_url
@@ -389,6 +559,11 @@ async def prepare_draft_from_input(
         logger.info("DRAFT CREATED draft_id=%s asin=%s seller_type=%s", draft_id, asin, seller_type)
         logger.info("DRAFT IMAGE RETAINED path=%s", held_image)
         return draft, held_image
+    except PromotionError:
+        cleanup_files(temp_files)
+        if held_image:
+            cleanup_files([held_image])
+        raise
     except RuntimeError as exc:
         if "Screenshot generation failed" in str(exc):
             logger.error("DRAFT PREPARATION FAILED — screenshot missing")
@@ -413,11 +588,25 @@ async def send_draft_preview(
     chat_id: int,
     draft: dict,
 ) -> None:
+    if _is_search_draft(draft) and is_search_url(draft.get("clean_url", "")):
+        raw_clean_url = draft["clean_url"]
+        normalized_clean_url = normalize_search_url(raw_clean_url, db=db)
+        if normalized_clean_url != raw_clean_url:
+            draft = dict(draft)
+            draft["clean_url"] = normalized_clean_url
+            if raw_clean_url in (draft.get("caption") or ""):
+                draft["caption"] = draft["caption"].replace(raw_clean_url, normalized_clean_url)
+
     duplicate = _is_duplicate_draft(db, draft)
     caption = build_preview_caption(draft, duplicate=duplicate)
 
     # Build inline keyboard for product buttons and fixed buttons (user-facing)
     products = _extract_products_from_draft(draft)
+    button_products = [
+        p
+        for p in products
+        if len((p.get("url") or "").encode("utf-8")) <= MAX_INLINE_BUTTON_URL_BYTES
+    ]
     fixed_buttons = db.list_fixed_buttons(enabled_only=True)
     product_buttons_enabled = db.get_product_buttons_enabled()
     fixed_position = db.get_fixed_buttons_position()
@@ -426,7 +615,7 @@ async def send_draft_preview(
     max_product_buttons = db.get_max_product_buttons()
 
     user_keyboard = build_inline_keyboard(
-        products,
+        button_products,
         fixed_buttons,
         product_buttons_enabled,
         fixed_buttons_position=fixed_position,
@@ -528,6 +717,21 @@ async def process_manual_text(
     await msg.reply_text(f"Preparing {len(inputs)} draft(s)…")
 
     app = context.application
+    browser = app.bot_data.get("browser") if hasattr(app, "bot_data") else None
+
+    if len(inputs) >= 2:
+        resolved_inputs: list[str] = []
+        for raw_item in inputs:
+            if is_standalone_asin(raw_item):
+                resolved_inputs.append(raw_item)
+            else:
+                classified = await resolve_and_classify_url(
+                    raw_item,
+                    domain=AMAZON_DOMAIN,
+                    browser=browser,
+                )
+                resolved_inputs.append(classified.resolved_url or raw_item)
+        inputs = resolved_inputs
 
     if _should_use_composite(inputs):
         try:
@@ -576,6 +780,69 @@ async def process_manual_text(
                 item,
                 scrape_key=scrape_key,
             )
+        except InvalidPromotionUrlError as exc:
+            logger.warning("INVALID PROMOTION URL: %s", exc)
+            await msg.reply_text(
+                f"❌ Invalid promotion URL.\n<code>{item[:80]}</code>",
+                parse_mode="HTML",
+            )
+            continue
+        except PromotionNavigationError as exc:
+            logger.warning("PROMOTION NAVIGATION FAILED: %s", exc)
+            await msg.reply_text(
+                f"❌ Failed to open the Amazon promotion page (navigation/page unavailable).\n<code>{item[:80]}</code>",
+                parse_mode="HTML",
+            )
+            continue
+        except PromotionScreenshotError as exc:
+            logger.error("PROMOTION SCREENSHOT FAILED: %s", exc)
+            await msg.reply_text(
+                f"❌ Failed to capture the promotion screenshot. Please try again.\n<code>{item[:80]}</code>",
+                parse_mode="HTML",
+            )
+            continue
+        except PromotionError as exc:
+            logger.error("PROMOTION PROCESSING FAILED: %s", exc)
+            await msg.reply_text(
+                f"❌ Failed to process promotion page.\n<code>{item[:80]}</code>",
+                parse_mode="HTML",
+            )
+            continue
+        except InvalidSearchUrlError as exc:
+            logger.warning("INVALID SEARCH URL: %s", exc)
+            await msg.reply_text(
+                f"❌ Invalid Amazon search URL.\n<code>{item[:80]}</code>",
+                parse_mode="HTML",
+            )
+            continue
+        except SearchEmptyResultsError as exc:
+            logger.warning("SEARCH EMPTY RESULTS: %s", exc)
+            await msg.reply_text(
+                f"❌ Amazon search page returned no product results.\n<code>{item[:80]}</code>",
+                parse_mode="HTML",
+            )
+            continue
+        except SearchNavigationError as exc:
+            logger.warning("SEARCH NAVIGATION FAILED: %s", exc)
+            await msg.reply_text(
+                f"❌ Failed to open the Amazon search page (navigation/page unavailable).\n<code>{item[:80]}</code>",
+                parse_mode="HTML",
+            )
+            continue
+        except SearchScreenshotError as exc:
+            logger.error("SEARCH SCREENSHOT FAILED: %s", exc)
+            await msg.reply_text(
+                f"❌ Failed to capture the search results screenshot. Please try again.\n<code>{item[:80]}</code>",
+                parse_mode="HTML",
+            )
+            continue
+        except SearchError as exc:
+            logger.error("SEARCH PROCESSING FAILED: %s", exc)
+            await msg.reply_text(
+                f"❌ Failed to process search results page.\n<code>{item[:80]}</code>",
+                parse_mode="HTML",
+            )
+            continue
         except RuntimeError as exc:
             if "Screenshot generation failed" in str(exc):
                 logger.error("DRAFT PREPARATION FAILED — screenshot missing")
@@ -678,15 +945,26 @@ async def handle_publish_draft(
 
     publish_path, publish_temp = prepare_channel_upload(draft["image_path"])
     try:
+        is_promotion = _is_promotion_draft(draft)
+        is_search = _is_search_draft(draft)
+        if is_search and is_search_url(draft.get("clean_url", "")):
+            raw_clean_url = draft["clean_url"]
+            normalized_clean_url = normalize_search_url(raw_clean_url, db=db)
+            if normalized_clean_url != raw_clean_url:
+                draft = dict(draft)
+                draft["clean_url"] = normalized_clean_url
+                if raw_clean_url in (draft.get("caption") or ""):
+                    draft["caption"] = draft["caption"].replace(raw_clean_url, normalized_clean_url)
         caption = draft["caption"]
         draft_asins = _draft_asins(draft)
         is_composite = len(draft_asins) > 1
 
-        # Check for duplicate ASINs in last published
+        # Check for duplicate ASINs / search keys in last published
         duplicate_asins = []
-        for asin in draft_asins:
-            if db.is_asin_in_last_published(asin, LAST_PUBLISHED_LOOKBACK, source="manual"):
-                duplicate_asins.append(asin)
+        if not is_promotion:
+            for asin in draft_asins:
+                if db.is_asin_in_last_published(asin, LAST_PUBLISHED_LOOKBACK, source="manual"):
+                    duplicate_asins.append(asin)
 
         if duplicate_asins:
             logger.info(
@@ -723,10 +1001,14 @@ async def handle_publish_draft(
                 f"⚠️ Duplicate ASIN detected: <code>{duplicate_asins[0]}</code>. Sent for approval.",
                 parse_mode="HTML",
             )
+            if publish_temp:
+                cleanup_files([publish_path])
             return
 
         if (
-            not is_composite
+            not is_promotion
+            and not is_search
+            and not is_composite
             and draft.get("price")
             and draft["price"] != "Not found"
         ):
@@ -743,6 +1025,11 @@ async def handle_publish_draft(
 
         # Build inline keyboard for product buttons and fixed buttons
         products = _extract_products_from_draft(draft)
+        button_products = [
+            p
+            for p in products
+            if len((p.get("url") or "").encode("utf-8")) <= MAX_INLINE_BUTTON_URL_BYTES
+        ]
         fixed_buttons = db.list_fixed_buttons(enabled_only=True)
         product_buttons_enabled = db.get_product_buttons_enabled()
         fixed_position = db.get_fixed_buttons_position()
@@ -750,7 +1037,7 @@ async def handle_publish_draft(
         product_template = db.get_product_button_template()
         max_product_buttons = db.get_max_product_buttons()
         inline_keyboard = build_inline_keyboard(
-            products,
+            button_products,
             fixed_buttons,
             product_buttons_enabled,
             fixed_buttons_position=fixed_position,
@@ -760,14 +1047,23 @@ async def handle_publish_draft(
         )
 
         # Determine products for overflow summary
-        products = _extract_products_from_draft(draft)
         published_product_count = len(products)
 
-        # Apply AI rewrite if this is a single ASIN draft
-        # Business logic: only rewrite single products, not composites
-        # Provider enable/disable is handled by ai_rewriter.py
-        apply_ai_rewrite = published_product_count == 1
-        reason = "single validated product" if published_product_count == 1 else f"{published_product_count} validated products"
+        # Apply AI rewrite if this is a single ASIN draft (not promotions, searches, or composites)
+        apply_ai_rewrite = (not is_promotion) and (not is_search) and (published_product_count == 1)
+        reason = (
+            "promotion post"
+            if is_promotion
+            else (
+                "search results post"
+                if is_search
+                else (
+                    "single validated product"
+                    if published_product_count == 1
+                    else f"{published_product_count} validated products"
+                )
+            )
+        )
         logger.info(
             "MANUAL POST → AI REWRITE DECISION\n"
             "  draft_asins=%s\n"
@@ -788,9 +1084,16 @@ async def handle_publish_draft(
         destinations = db.get_enabled_destinations()
         if not destinations:
             await query.edit_message_caption("❌ No enabled destinations configured.")
+            if publish_temp:
+                cleanup_files([publish_path])
             return
 
         # Publish to all destinations
+        publish_type = (
+            "PROMOTION"
+            if is_promotion
+            else ("SEARCH" if is_search else None)
+        )
         result = await publish_to_destinations(
             context.application.bot,
             destinations,
@@ -798,31 +1101,35 @@ async def handle_publish_draft(
             caption,
             reply_markup=inline_keyboard if inline_keyboard.inline_keyboard else None,
             products=products,
+            publish_type=publish_type,
         )
         result.log_summary()
 
         if result.successful == 0:
             await query.edit_message_caption("❌ Failed to publish to any destination.")
+            if publish_temp:
+                cleanup_files([publish_path])
             return
 
-        price_fields = extract_published_price_fields(
-            draft.get("price") or "",
-            draft.get("list_price"),
-        )
-        for asin in draft_asins:
-            for publish_result in result.results:
-                if publish_result.success:
-                    db.add_published_product(
-                        asin,
-                        draft["title"],
-                        draft["created_by"],
-                        publish_result.message_id,
-                        destination_id=publish_result.destination_id,
-                        seller_type=draft.get("seller_type") or "NEW_AMAZON",
-                        image_path=draft.get("image_path"),
-                        clean_url=draft.get("clean_url"),
-                        **price_fields,
-                    )
+        if not is_promotion:
+            price_fields = extract_published_price_fields(
+                draft.get("price") or "",
+                draft.get("list_price"),
+            )
+            for asin in draft_asins:
+                for publish_result in result.results:
+                    if publish_result.success:
+                        db.add_published_product(
+                            asin,
+                            draft["title"],
+                            draft["created_by"],
+                            publish_result.message_id,
+                            destination_id=publish_result.destination_id,
+                            seller_type=draft.get("seller_type") or "NEW_AMAZON",
+                            image_path=draft.get("image_path"),
+                            clean_url=draft.get("clean_url"),
+                            **price_fields,
+                        )
         if not db.set_draft_status(draft_id, "published"):
             await query.edit_message_caption("Already handled.")
             logger.info(
@@ -848,6 +1155,8 @@ async def handle_publish_draft(
         cleanup_files(paths)
     except Exception:
         logger.exception("DRAFT publish failed draft_id=%s", draft_id)
+        if publish_temp:
+            cleanup_files([publish_path])
         await query.answer("Publish failed", show_alert=True)
 
 

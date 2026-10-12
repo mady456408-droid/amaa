@@ -48,12 +48,14 @@ from file_cleanup import cleanup_files
 from coupon_price import coupon_apply_kwargs_from_product
 from manual_posts import build_manual_handlers
 from link_resolver import (
+    ResolvedProductInput,
     build_clean_url,
     close_http_client,
     extract_all_urls_from_message,
     extract_asin,
     get_message_text,
     init_http_client,
+    resolve_and_classify_url,
     resolve_product_input,
     resolve_redirect,
 )
@@ -65,6 +67,27 @@ from backup_restore import maybe_notify_restore_complete
 from inline_buttons import build_inline_keyboard
 from ai_rewriter import rewrite_caption
 from upload_prep import to_jpeg_for_telegram
+from promotion_handler import (
+    InvalidPromotionUrlError,
+    PromotionError,
+    PromotionNavigationError,
+    PromotionPublishError,
+    PromotionScreenshotError,
+    is_promotion_url,
+    process_promotion_url,
+    publish_promotion_to_telegram,
+)
+from search_handler import (
+    InvalidSearchUrlError,
+    SearchEmptyResultsError,
+    SearchError,
+    SearchNavigationError,
+    SearchPublishError,
+    SearchScreenshotError,
+    is_search_url,
+    process_search_url,
+    publish_search_to_telegram,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,6 +109,8 @@ async def validate_and_fetch_url(
     url: str,
     message_id: int,
     index: int,
+    *,
+    pre_resolved: ResolvedProductInput | None = None,
 ) -> dict | None:
     """
     Validate URL and fetch product data without publishing.
@@ -94,7 +119,7 @@ async def validate_and_fetch_url(
     try:
         logger.debug("VALIDATING URL %s: %s", index, url)
 
-        resolved = await resolve_product_input(url, AMAZON_DOMAIN)
+        resolved = pre_resolved or await resolve_product_input(url, AMAZON_DOMAIN, browser=browser)
         if not resolved:
             logger.warning("URL FAILED — no valid product resolution for %s", url)
             return None
@@ -347,6 +372,137 @@ async def publish_validated_product(
             cleanup_files(list(temp_files))
 
 
+async def process_promotion_message_url(
+    application,
+    browser: BrowserManager,
+    db: Database,
+    url: str,
+    msg: Message,
+    index: int,
+    total: int,
+) -> bool:
+    """Process one Amazon promotion URL and publish it to Telegram destinations."""
+    promo_data: dict | None = None
+    try:
+        scrape_key = f"promo_{msg.message_id}_{index}"
+        promo_data = await process_promotion_url(
+            browser,
+            db,
+            url,
+            scrape_key=scrape_key,
+            domain=AMAZON_DOMAIN,
+        )
+        ok = await publish_promotion_to_telegram(
+            application,
+            db,
+            promo_data,
+            cleanup_after=True,
+        )
+        if ok:
+            logger.info(
+                "PUBLISHED PROMOTION URL %s/%s promo_id=%s",
+                index,
+                total,
+                promo_data.get("promotion_id"),
+            )
+        return ok
+    except InvalidPromotionUrlError as exc:
+        logger.warning("INVALID PROMOTION URL %s/%s: %s", index, total, exc)
+        return False
+    except PromotionNavigationError as exc:
+        logger.warning("PROMOTION NAVIGATION FAILED %s/%s: %s", index, total, exc)
+        return False
+    except PromotionScreenshotError as exc:
+        logger.error("PROMOTION SCREENSHOT FAILED %s/%s: %s", index, total, exc)
+        return False
+    except PromotionPublishError as exc:
+        logger.error("PROMOTION TELEGRAM PUBLISH FAILED %s/%s: %s", index, total, exc)
+        return False
+    except PromotionError as exc:
+        logger.error("PROMOTION ERROR %s/%s: %s", index, total, exc)
+        return False
+    except Exception:
+        logger.exception("PROMOTION URL PROCESSING FAILED %s/%s: %s", index, total, url)
+        return False
+    finally:
+        if promo_data and promo_data.get("screenshot"):
+            cleanup_files([promo_data["screenshot"]])
+
+
+async def process_search_message_url(
+    application,
+    browser: BrowserManager,
+    db: Database,
+    url: str,
+    msg: Message,
+    index: int,
+    total: int,
+) -> bool:
+    """Process one Amazon search-results URL and publish it to Telegram destinations."""
+    search_data: dict | None = None
+    try:
+        scrape_key = f"search_{msg.message_id}_{index}"
+        search_data = await process_search_url(
+            browser,
+            db,
+            url,
+            scrape_key=scrape_key,
+            domain=AMAZON_DOMAIN,
+        )
+        source_channel_id = getattr(msg, "chat_id", 0) or 0
+        ok = await publish_search_to_telegram(
+            application,
+            db,
+            search_data,
+            source_channel_id=source_channel_id,
+            cleanup_after=True,
+        )
+        if ok:
+            logger.info(
+                "PUBLISHED SEARCH URL %s/%s search_key=%s affiliate_url=%s",
+                index,
+                total,
+                search_data.get("search_key"),
+                search_data.get("affiliate_url"),
+            )
+        return ok
+    except InvalidSearchUrlError as exc:
+        logger.warning("INVALID SEARCH URL %s/%s: %s", index, total, exc)
+        if search_data and search_data.get("screenshot"):
+            cleanup_files([search_data["screenshot"]])
+        return False
+    except SearchEmptyResultsError as exc:
+        logger.warning("SEARCH EMPTY RESULTS %s/%s: %s", index, total, exc)
+        if search_data and search_data.get("screenshot"):
+            cleanup_files([search_data["screenshot"]])
+        return False
+    except SearchNavigationError as exc:
+        logger.warning("SEARCH NAVIGATION FAILED %s/%s: %s", index, total, exc)
+        if search_data and search_data.get("screenshot"):
+            cleanup_files([search_data["screenshot"]])
+        return False
+    except SearchScreenshotError as exc:
+        logger.error("SEARCH SCREENSHOT FAILED %s/%s: %s", index, total, exc)
+        if search_data and search_data.get("screenshot"):
+            cleanup_files([search_data["screenshot"]])
+        return False
+    except SearchPublishError as exc:
+        logger.error("SEARCH TELEGRAM PUBLISH FAILED %s/%s: %s", index, total, exc)
+        if search_data and search_data.get("screenshot"):
+            cleanup_files([search_data["screenshot"]])
+        return False
+    except SearchError as exc:
+        logger.error("SEARCH ERROR %s/%s: %s", index, total, exc)
+        if search_data and search_data.get("screenshot"):
+            cleanup_files([search_data["screenshot"]])
+        return False
+    except Exception:
+        logger.exception("SEARCH URL PROCESSING FAILED %s/%s: %s", index, total, url)
+        if search_data and search_data.get("screenshot"):
+            cleanup_files([search_data["screenshot"]])
+        return False
+
+
 async def process_single_url(
     application,
     browser: BrowserManager,
@@ -357,14 +513,53 @@ async def process_single_url(
     total: int,
     apply_gemini: bool = True,
 ) -> bool:
-    """Process one URL; return True if published (not pending approval)."""
-    # Validate and fetch
+    """Process one URL using Resolve-First, Classify-Second; return True if published."""
+    classified = await resolve_and_classify_url(
+        url,
+        domain=AMAZON_DOMAIN,
+        browser=browser,
+    )
+
+    if classified.destination_type == "promotion" and classified.resolved_url:
+        return await process_promotion_message_url(
+            application,
+            browser,
+            db,
+            classified.resolved_url,
+            msg,
+            index,
+            total,
+        )
+
+    if classified.destination_type == "search" and classified.resolved_url:
+        return await process_search_message_url(
+            application,
+            browser,
+            db,
+            classified.resolved_url,
+            msg,
+            index,
+            total,
+        )
+
+    if classified.destination_type != "product":
+        logger.warning(
+            "URL SKIPPED %s/%s — destination_type=%s reason=%s",
+            index,
+            total,
+            classified.destination_type,
+            classified.error_reason,
+        )
+        return False
+
+    # Validate and fetch product
     validated = await validate_and_fetch_url(
         browser,
         db,
-        url,
+        classified.resolved_url or url,
         msg.message_id,
         index,
+        pre_resolved=classified.product_resolution,
     )
     if not validated:
         return False
@@ -565,164 +760,221 @@ async def process_message(application, msg: Message) -> None:
     published = 0
     t_total = time.perf_counter()
 
-    # Check if composite should be used
-    use_composite = FRAME_PRODUCT_IMAGES and 2 <= total <= get_composite_max_products()
+    promotion_urls: list[str] = []
+    search_urls: list[str] = []
+    product_urls: list[str] = []
 
-    # Determine if Gemini should be applied based on final published count
-    # We need to process URLs first to determine how many will actually be published
-    # For single URL mode, we can determine this after processing
-    # For composite mode, we need to check before processing
+    for raw_url in urls:
+        classified = await resolve_and_classify_url(
+            raw_url,
+            domain=AMAZON_DOMAIN,
+            browser=browser,
+        )
+        if classified.destination_type == "promotion" and classified.resolved_url:
+            promotion_urls.append(classified.resolved_url)
+        elif classified.destination_type == "search" and classified.resolved_url:
+            search_urls.append(classified.resolved_url)
+        elif classified.destination_type == "product" and (classified.resolved_url or raw_url):
+            product_urls.append(classified.resolved_url or raw_url)
+        else:
+            logger.warning(
+                "SKIPPING URL in message_id=%s url=%s destination_type=%s reason=%s",
+                message_id,
+                raw_url,
+                classified.destination_type,
+                classified.error_reason,
+            )
 
-    if use_composite:
-        logger.info("USING COMPOSITE MODE for %s URLs", total)
-        # Composite mode: always multi-product, so no Gemini
-        ok = await process_composite_urls(
+    for promo_idx, promo_url in enumerate(promotion_urls, start=1):
+        ok = await process_promotion_message_url(
             application,
             browser,
             db,
-            urls,
+            promo_url,
             msg,
-            chunk_index=1,
-            total_chunks=1,
+            promo_idx,
+            total,
         )
         if ok:
-            published = 1
-    else:
-        # Single product mode or too many products - chunk and process individually
-        if total > get_composite_max_products():
-            logger.info("TOO MANY URLS (%s) - chunking for composite processing", total)
-            url_chunks = chunk_urls_for_composite(urls)
-            for chunk_index, chunk in enumerate(url_chunks, start=1):
-                if len(chunk) >= 2:
-                    # Composite chunk - no Gemini
-                    ok = await process_composite_urls(
-                        application,
-                        browser,
-                        db,
-                        chunk,
-                        msg,
-                        chunk_index,
-                        len(url_chunks),
-                    )
-                else:
-                    # Single URL in chunk - use two-phase approach
-                    logger.info("CHUNK %s/%s: PHASE 1 VALIDATING %s URLs", chunk_index, len(url_chunks), len(chunk))
-                    validated_products = []
-                    for url_index, url in enumerate(chunk, start=1):
-                        validated = await validate_and_fetch_url(
+            published += 1
+            if (promo_idx < len(promotion_urls) or search_urls or product_urls) and PUBLISH_DELAY_SEC > 0:
+                await asyncio.sleep(PUBLISH_DELAY_SEC)
+
+    for search_idx, search_url in enumerate(search_urls, start=len(promotion_urls) + 1):
+        ok = await process_search_message_url(
+            application,
+            browser,
+            db,
+            search_url,
+            msg,
+            search_idx,
+            total,
+        )
+        if ok:
+            published += 1
+            if (search_idx - len(promotion_urls) < len(search_urls) or product_urls) and PUBLISH_DELAY_SEC > 0:
+                await asyncio.sleep(PUBLISH_DELAY_SEC)
+
+    if product_urls:
+        product_total = len(product_urls)
+        # Check if composite should be used
+        use_composite = FRAME_PRODUCT_IMAGES and 2 <= product_total <= get_composite_max_products()
+
+        # Determine if Gemini should be applied based on final published count
+        # We need to process URLs first to determine how many will actually be published
+        # For single URL mode, we can determine this after processing
+        # For composite mode, we need to check before processing
+
+        if use_composite:
+            logger.info("USING COMPOSITE MODE for %s URLs", product_total)
+            # Composite mode: always multi-product, so no Gemini
+            ok = await process_composite_urls(
+                application,
+                browser,
+                db,
+                product_urls,
+                msg,
+                chunk_index=1,
+                total_chunks=1,
+            )
+            if ok:
+                published += 1
+        else:
+            # Single product mode or too many products - chunk and process individually
+            if product_total > get_composite_max_products():
+                logger.info("TOO MANY URLS (%s) - chunking for composite processing", product_total)
+                url_chunks = chunk_urls_for_composite(product_urls)
+                for chunk_index, chunk in enumerate(url_chunks, start=1):
+                    if len(chunk) >= 2:
+                        # Composite chunk - no Gemini
+                        ok = await process_composite_urls(
+                            application,
                             browser,
                             db,
-                            url,
-                            message_id,
-                            chunk_index * 100 + url_index,  # Unique index
-                        )
-                        if validated:
-                            validated_products.append(validated)
-
-                    resolved_count = len(validated_products)
-                    logger.info(
-                        "CHUNK %s/%s: PHASE 1 COMPLETE: original_urls=%s resolved_products=%s",
-                        chunk_index,
-                        len(url_chunks),
-                        len(chunk),
-                        resolved_count,
-                    )
-
-                    # Decide on AI rewrite based on actual validated count in this chunk
-                    # Business logic: only rewrite single products, not composites
-                    apply_ai_rewrite = resolved_count == 1
-                    reason = "single validated product" if resolved_count == 1 else f"{resolved_count} validated products"
-                    logger.info(
-                        "CHUNK %s/%s: AI REWRITE DECISION\n"
-                        "  original_urls=%s\n"
-                        "  validated_products=%s\n"
-                        "  should_rewrite=%s\n"
-                        "  reason=%s",
-                        chunk_index,
-                        len(url_chunks),
-                        len(chunk),
-                        resolved_count,
-                        apply_ai_rewrite,
-                        reason,
-                    )
-
-                    # Publish validated products
-                    logger.info("CHUNK %s/%s: PHASE 2 PUBLISHING %s validated products", chunk_index, len(url_chunks), resolved_count)
-                    for validated_index, validated in enumerate(validated_products, start=1):
-                        ok = await publish_validated_product(
-                            application,
-                            db,
-                            validated,
+                            chunk,
                             msg,
-                            apply_ai_rewrite,
+                            chunk_index,
+                            len(url_chunks),
                         )
-                        if ok:
-                            published += 1
-                if chunk_index < len(url_chunks) and PUBLISH_DELAY_SEC > 0:
-                    await asyncio.sleep(PUBLISH_DELAY_SEC)
-        else:
-            # Single product or composite disabled - process individually
-            # Two-phase approach:
-            # Phase 1: Validate all URLs to determine which will succeed
-            # Phase 2: Count successful validations, decide on Gemini, then publish
+                    else:
+                        # Single URL in chunk - use two-phase approach
+                        logger.info("CHUNK %s/%s: PHASE 1 VALIDATING %s URLs", chunk_index, len(url_chunks), len(chunk))
+                        validated_products = []
+                        for url_index, url in enumerate(chunk, start=1):
+                            validated = await validate_and_fetch_url(
+                                browser,
+                                db,
+                                url,
+                                message_id,
+                                chunk_index * 100 + url_index,  # Unique index
+                            )
+                            if validated:
+                                validated_products.append(validated)
 
-            logger.info("PHASE 1: VALIDATING %s URLs", total)
-            validated_products = []
-            for index, url in enumerate(urls, start=1):
-                validated = await validate_and_fetch_url(
-                    browser,
-                    db,
-                    url,
-                    message_id,
-                    index,
-                )
-                if validated:
-                    validated_products.append(validated)
+                        resolved_count = len(validated_products)
+                        logger.info(
+                            "CHUNK %s/%s: PHASE 1 COMPLETE: original_urls=%s resolved_products=%s",
+                            chunk_index,
+                            len(url_chunks),
+                            len(chunk),
+                            resolved_count,
+                        )
 
-            resolved_count = len(validated_products)
-            logger.info(
-                "PHASE 1 COMPLETE: original_urls=%s resolved_products=%s",
-                total,
-                resolved_count,
-            )
+                        # Decide on AI rewrite based on actual validated count in this chunk
+                        # Business logic: only rewrite single products, not composites
+                        apply_ai_rewrite = resolved_count == 1
+                        reason = "single validated product" if resolved_count == 1 else f"{resolved_count} validated products"
+                        logger.info(
+                            "CHUNK %s/%s: AI REWRITE DECISION\n"
+                            "  original_urls=%s\n"
+                            "  validated_products=%s\n"
+                            "  should_rewrite=%s\n"
+                            "  reason=%s",
+                            chunk_index,
+                            len(url_chunks),
+                            len(chunk),
+                            resolved_count,
+                            apply_ai_rewrite,
+                            reason,
+                        )
 
-            # Phase 2: Decide on AI rewrite based on actual validated count
-            # Business logic: only rewrite single products, not composites
-            apply_ai_rewrite = resolved_count == 1
-            reason = "single validated product" if resolved_count == 1 else f"{resolved_count} validated products"
-            logger.info(
-                "SOURCE POST → AI REWRITE DECISION\n"
-                "  original_urls=%s\n"
-                "  validated_products=%s\n"
-                "  should_rewrite=%s\n"
-                "  reason=%s",
-                total,
-                resolved_count,
-                apply_ai_rewrite,
-                reason,
-            )
-
-            # Phase 3: Publish validated products
-            logger.info("PHASE 2: PUBLISHING %s validated products", resolved_count)
-            for index, validated in enumerate(validated_products, start=1):
-                ok = await publish_validated_product(
-                    application,
-                    db,
-                    validated,
-                    msg,
-                    apply_ai_rewrite,
-                )
-                if ok:
-                    published += 1
-                    if index < resolved_count and PUBLISH_DELAY_SEC > 0:
+                        # Publish validated products
+                        logger.info("CHUNK %s/%s: PHASE 2 PUBLISHING %s validated products", chunk_index, len(url_chunks), resolved_count)
+                        for validated_index, validated in enumerate(validated_products, start=1):
+                            ok = await publish_validated_product(
+                                application,
+                                db,
+                                validated,
+                                msg,
+                                apply_ai_rewrite,
+                            )
+                            if ok:
+                                published += 1
+                    if chunk_index < len(url_chunks) and PUBLISH_DELAY_SEC > 0:
                         await asyncio.sleep(PUBLISH_DELAY_SEC)
+            else:
+                # Single product or composite disabled - process individually
+                # Two-phase approach:
+                # Phase 1: Validate all URLs to determine which will succeed
+                # Phase 2: Count successful validations, decide on Gemini, then publish
 
-            logger.info(
-                "SOURCE POST → FINAL: original_urls=%s resolved_products=%s published_products=%s",
-                total,
-                resolved_count,
-                published,
-            )
+                logger.info("PHASE 1: VALIDATING %s URLs", product_total)
+                validated_products = []
+                for index, url in enumerate(product_urls, start=1):
+                    validated = await validate_and_fetch_url(
+                        browser,
+                        db,
+                        url,
+                        message_id,
+                        index,
+                    )
+                    if validated:
+                        validated_products.append(validated)
+
+                resolved_count = len(validated_products)
+                logger.info(
+                    "PHASE 1 COMPLETE: original_urls=%s resolved_products=%s",
+                    product_total,
+                    resolved_count,
+                )
+
+                # Phase 2: Decide on AI rewrite based on actual validated count
+                # Business logic: only rewrite single products, not composites
+                apply_ai_rewrite = resolved_count == 1
+                reason = "single validated product" if resolved_count == 1 else f"{resolved_count} validated products"
+                logger.info(
+                    "SOURCE POST → AI REWRITE DECISION\n"
+                    "  original_urls=%s\n"
+                    "  validated_products=%s\n"
+                    "  should_rewrite=%s\n"
+                    "  reason=%s",
+                    product_total,
+                    resolved_count,
+                    apply_ai_rewrite,
+                    reason,
+                )
+
+                # Phase 3: Publish validated products
+                logger.info("PHASE 2: PUBLISHING %s validated products", resolved_count)
+                for index, validated in enumerate(validated_products, start=1):
+                    ok = await publish_validated_product(
+                        application,
+                        db,
+                        validated,
+                        msg,
+                        apply_ai_rewrite,
+                    )
+                    if ok:
+                        published += 1
+                        if index < resolved_count and PUBLISH_DELAY_SEC > 0:
+                            await asyncio.sleep(PUBLISH_DELAY_SEC)
+
+                logger.info(
+                    "SOURCE POST → FINAL: original_urls=%s resolved_products=%s published_products=%s",
+                    product_total,
+                    resolved_count,
+                    published,
+                )
 
     logger.info("PUBLISHED %s/%s", published, total)
     logger.info(
