@@ -1338,6 +1338,8 @@ class CreatorsClient:
                 len(asins),
                 len(out),
             )
+            if target_limiter is not None:
+                await target_limiter.record_success()
             return out
         finally:
             await target_limiter.release_request()

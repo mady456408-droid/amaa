@@ -788,11 +788,18 @@ async def process_manual_text(
             )
             continue
         except PromotionNavigationError as exc:
-            logger.warning("PROMOTION NAVIGATION FAILED: %s", exc)
-            await msg.reply_text(
-                f"❌ Failed to open the Amazon promotion page (navigation/page unavailable).\n<code>{item[:80]}</code>",
-                parse_mode="HTML",
-            )
+            logger.warning("PROMOTION NAVIGATION FAILED: %s (retryable=%s)", exc, getattr(exc, "retryable", False))
+            if getattr(exc, "retryable", False):
+                status_txt = f" (HTTP {exc.status_code})" if getattr(exc, "status_code", None) else ""
+                await msg.reply_text(
+                    f"⚠️ Amazon returned temporary error{status_txt}. Request was not marked successful and can be retried.\n<code>{item[:80]}</code>",
+                    parse_mode="HTML",
+                )
+            else:
+                await msg.reply_text(
+                    f"❌ Failed to open the Amazon promotion page (navigation/page unavailable).\n<code>{item[:80]}</code>",
+                    parse_mode="HTML",
+                )
             continue
         except PromotionScreenshotError as exc:
             logger.error("PROMOTION SCREENSHOT FAILED: %s", exc)
@@ -823,11 +830,18 @@ async def process_manual_text(
             )
             continue
         except SearchNavigationError as exc:
-            logger.warning("SEARCH NAVIGATION FAILED: %s", exc)
-            await msg.reply_text(
-                f"❌ Failed to open the Amazon search page (navigation/page unavailable).\n<code>{item[:80]}</code>",
-                parse_mode="HTML",
-            )
+            logger.warning("SEARCH NAVIGATION FAILED: %s (retryable=%s)", exc, getattr(exc, "retryable", False))
+            if getattr(exc, "retryable", False):
+                status_txt = f" (HTTP {exc.status_code})" if getattr(exc, "status_code", None) else ""
+                await msg.reply_text(
+                    f"⚠️ Amazon search returned temporary error{status_txt}. Request was not marked successful and can be retried.\n<code>{item[:80]}</code>",
+                    parse_mode="HTML",
+                )
+            else:
+                await msg.reply_text(
+                    f"❌ Failed to open the Amazon search page (navigation/page unavailable).\n<code>{item[:80]}</code>",
+                    parse_mode="HTML",
+                )
             continue
         except SearchScreenshotError as exc:
             logger.error("SEARCH SCREENSHOT FAILED: %s", exc)
@@ -941,7 +955,19 @@ async def handle_publish_draft(
     destination_id = context.application.bot_data.get("destination_channel_id")
     if not destination_id:
         await query.answer("Destination not configured", show_alert=True)
+    image_path = draft.get("image_path")
+    if not image_path or not os.path.isfile(image_path) or os.path.getsize(image_path) <= 0:
+        await query.edit_message_caption("❌ Draft image file is missing or empty. Draft preserved for retry.")
         return
+
+    try:
+        with Image.open(image_path) as img:
+            extrema = img.convert("L").getextrema()
+            if extrema is not None and extrema[0] == extrema[1]:
+                await query.edit_message_caption("❌ Draft image is blank. Operation cancelled; draft preserved for retry.")
+                return
+    except Exception:
+        pass
 
     publish_path, publish_temp = prepare_channel_upload(draft["image_path"])
     try:
@@ -1106,7 +1132,7 @@ async def handle_publish_draft(
         result.log_summary()
 
         if result.successful == 0:
-            await query.edit_message_caption("❌ Failed to publish to any destination.")
+            await query.edit_message_caption("❌ Failed to publish to any destination. Draft preserved for retry.")
             if publish_temp:
                 cleanup_files([publish_path])
             return

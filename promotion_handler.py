@@ -10,12 +10,16 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import random
 import re
 import time
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
+
+from PIL import Image
 
 from affiliate_tag import apply_affiliate_tag
 from amazon_scraper import BrowserManager
@@ -31,6 +35,14 @@ logger = logging.getLogger(__name__)
 _ACCEPT_LANGUAGE = "ar-EG,ar;q=0.9,en;q=0.8"
 
 FALLBACK_PROMOTION_TITLE = "عرض ترويجي من أمازون"
+
+# Navigation retry constants
+MAX_NAVIGATION_RETRIES = 3
+BASE_BACKOFF_SECONDS = 1.5
+MAX_BACKOFF_SECONDS = 8.0
+BACKOFF_JITTER_SECONDS = 0.5
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+_nav_sleep = asyncio.sleep
 
 # Sensible viewport suitable for reading Arabic and English promotion pages
 PROMOTION_VIEWPORT_WIDTH = 1366
@@ -217,6 +229,25 @@ class InvalidPromotionUrlError(PromotionError):
 class PromotionNavigationError(PromotionError):
     """Raised when opening or rendering the promotion page fails (timeout, CAPTCHA, unavailable)."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        if retryable is None:
+            self.retryable = (
+                status_code in RETRYABLE_STATUS_CODES
+                or "503" in message
+                or "timeout" in message.lower()
+                or "temporarily" in message.lower()
+            )
+        else:
+            self.retryable = retryable
+
 
 class PromotionScreenshotError(PromotionError):
     """Raised when capturing or verifying the promotion screenshot fails."""
@@ -224,6 +255,43 @@ class PromotionScreenshotError(PromotionError):
 
 class PromotionPublishError(PromotionError):
     """Raised when uploading the promotion photo to Telegram fails."""
+
+
+def _validate_screenshot_file(screenshot_path: str) -> None:
+    """
+    Ensure the captured screenshot file exists, is non-empty, and is not a blank
+    single-color image. Raises PromotionScreenshotError on invalid/blank files.
+    """
+    if not screenshot_path or not os.path.isfile(screenshot_path):
+        raise PromotionScreenshotError(f"Promotion screenshot file does not exist: {screenshot_path}")
+
+    size = os.path.getsize(screenshot_path)
+    if size <= 0:
+        raise PromotionScreenshotError(f"Promotion screenshot file is empty (0 bytes): {screenshot_path}")
+
+    try:
+        with open(screenshot_path, "rb") as f:
+            header = f.read(8)
+    except Exception as exc:
+        raise PromotionScreenshotError(f"Cannot read screenshot file {screenshot_path}: {exc}") from exc
+
+    is_png = header.startswith(b"\x89PNG\r\n\x1a\n")
+    is_jpeg = header.startswith(b"\xff\xd8\xff")
+    if is_png or is_jpeg:
+        try:
+            with Image.open(screenshot_path) as img:
+                width, height = img.size
+                if width <= 0 or height <= 0:
+                    raise PromotionScreenshotError("Screenshot has invalid zero dimensions")
+                extrema = img.convert("L").getextrema()
+                if extrema is not None and extrema[0] == extrema[1]:
+                    raise PromotionScreenshotError(
+                        f"Captured promotion screenshot is completely blank (uniform pixel value={extrema[0]})"
+                    )
+        except PromotionScreenshotError:
+            raise
+        except Exception as exc:
+            raise PromotionScreenshotError(f"Invalid image file at {screenshot_path}: {exc}") from exc
 
 
 def _clean_raw_url(url: str) -> str:
@@ -820,9 +888,11 @@ async def _capture_promotion_screenshot(page, screenshot_path: str) -> str:
         cleanup_files([screenshot_path])
         raise PromotionScreenshotError(f"Failed to capture promotion screenshot: {exc}") from exc
 
-    if not screenshot_path or not os.path.isfile(screenshot_path) or os.path.getsize(screenshot_path) <= 0:
+    try:
+        _validate_screenshot_file(screenshot_path)
+    except Exception:
         cleanup_files([screenshot_path])
-        raise PromotionScreenshotError(f"Promotion screenshot file missing or empty: {screenshot_path}")
+        raise
 
     return screenshot_path
 
@@ -853,34 +923,135 @@ async def scrape_promotion_page(
     screenshot_path = f"{scrape_key}.png"
 
     try:
-        # Navigate with retry on transient timeout
+        # Navigate with bounded retry, exponential backoff, and jitter
         last_nav_err: Exception | None = None
-        for attempt in range(2):
+        last_status: int | None = None
+        status_display: str = "unknown"
+        attempts_made: int = 0
+
+        for attempt in range(1, MAX_NAVIGATION_RETRIES + 1):
+            attempts_made = attempt
             try:
                 response = await page.goto(
                     normalized_url,
                     timeout=30000,
                     wait_until="domcontentloaded",
                 )
-                if response is not None and getattr(response, "status", 200) >= 400:
-                    raise PromotionNavigationError(
-                        f"HTTP {response.status} when loading promotion page {normalized_url}"
+                status_code = getattr(response, "status", 200) if response is not None else 200
+                last_status = status_code
+                status_display = f"HTTP_{status_code}"
+
+                if status_code in RETRYABLE_STATUS_CODES:
+                    err_msg = f"HTTP {status_code} when loading promotion page {normalized_url}"
+                    if attempt < MAX_NAVIGATION_RETRIES:
+                        backoff = min(
+                            MAX_BACKOFF_SECONDS,
+                            BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)),
+                        ) + random.uniform(0.1, BACKOFF_JITTER_SECONDS)
+                        logger.warning(
+                            "NAVIGATION RETRY [promotion_handler]:\n"
+                            "  handler=promotion_handler\n"
+                            "  url=%s\n"
+                            "  attempt=%d/%d\n"
+                            "  status=%s\n"
+                            "  retryable=True\n"
+                            "  backoff=%.2fs",
+                            normalized_url,
+                            attempt,
+                            MAX_NAVIGATION_RETRIES,
+                            status_display,
+                            backoff,
+                        )
+                        await _nav_sleep(backoff)
+                        continue
+                    else:
+                        last_nav_err = PromotionNavigationError(
+                            err_msg,
+                            status_code=status_code,
+                            retryable=True,
+                        )
+                        break
+
+                if 400 <= status_code < 500 and status_code not in RETRYABLE_STATUS_CODES:
+                    # Non-retryable client error (e.g. 404 Not Found)
+                    last_nav_err = PromotionNavigationError(
+                        f"HTTP {status_code} when loading promotion page {normalized_url}",
+                        status_code=status_code,
+                        retryable=False,
                     )
+                    break
+
+                # Success (2xx / 3xx)
                 last_nav_err = None
+                logger.info(
+                    "NAVIGATION SUCCESS [promotion_handler]:\n"
+                    "  handler=promotion_handler\n"
+                    "  url=%s\n"
+                    "  attempt=%d/%d\n"
+                    "  status=%d",
+                    normalized_url,
+                    attempt,
+                    MAX_NAVIGATION_RETRIES,
+                    status_code,
+                )
                 break
-            except PromotionNavigationError:
-                raise
+
+            except PromotionNavigationError as p_err:
+                last_nav_err = p_err
+                break
             except Exception as exc:
                 last_nav_err = exc
-                if attempt == 0:
-                    logger.warning("Promotion page.goto failed (attempt 1), retrying: %s", exc)
+                status_display = type(exc).__name__
+                if attempt < MAX_NAVIGATION_RETRIES:
+                    backoff = min(
+                        MAX_BACKOFF_SECONDS,
+                        BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)),
+                    ) + random.uniform(0.1, BACKOFF_JITTER_SECONDS)
+                    logger.warning(
+                        "NAVIGATION RETRY [promotion_handler]:\n"
+                        "  handler=promotion_handler\n"
+                        "  url=%s\n"
+                        "  attempt=%d/%d\n"
+                        "  status=%s\n"
+                        "  retryable=True\n"
+                        "  backoff=%.2fs\n"
+                        "  error=%s",
+                        normalized_url,
+                        attempt,
+                        MAX_NAVIGATION_RETRIES,
+                        status_display,
+                        backoff,
+                        exc,
+                    )
+                    await _nav_sleep(backoff)
+                    continue
                 else:
-                    raise PromotionNavigationError(
-                        f"Navigation failed for promotion URL {normalized_url}: {exc}"
-                    ) from exc
+                    break
 
         if last_nav_err is not None:
-            raise PromotionNavigationError(f"Navigation failed: {last_nav_err}") from last_nav_err
+            is_retryable = getattr(last_nav_err, "retryable", True)
+            final_reason = str(last_nav_err)
+            logger.error(
+                "NAVIGATION FAILED [promotion_handler]:\n"
+                "  handler=promotion_handler\n"
+                "  url=%s\n"
+                "  retry_count=%d\n"
+                "  navigation_status=%s\n"
+                "  retryable=%s\n"
+                "  final_failure_reason=%s",
+                normalized_url,
+                attempts_made,
+                status_display,
+                is_retryable,
+                final_reason,
+            )
+            if isinstance(last_nav_err, PromotionNavigationError):
+                raise last_nav_err
+            raise PromotionNavigationError(
+                f"Navigation failed for promotion URL {normalized_url}: {last_nav_err}",
+                status_code=last_status,
+                retryable=is_retryable,
+            ) from last_nav_err
 
         await _bypass_continue_shopping_if_present(page, promo_id)
         await _check_page_unavailable_or_captcha(page)

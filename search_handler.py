@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
+import random
 import re
 import time
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from PIL import Image
+
+# Navigation retry constants
+MAX_NAVIGATION_RETRIES = 3
+BASE_BACKOFF_SECONDS = 1.5
+MAX_BACKOFF_SECONDS = 8.0
+BACKOFF_JITTER_SECONDS = 0.5
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+_nav_sleep = asyncio.sleep
 
 from affiliate_tag import get_default_affiliate_tag
 from amazon_scraper import USER_AGENT, BrowserManager
@@ -159,6 +169,25 @@ class InvalidSearchUrlError(SearchError):
 
 class SearchNavigationError(SearchError):
     """Raised when the search page cannot be loaded (timeout, HTTP error, CAPTCHA, etc.)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        if retryable is None:
+            self.retryable = (
+                status_code in RETRYABLE_STATUS_CODES
+                or "503" in message
+                or "timeout" in message.lower()
+                or "temporarily" in message.lower()
+            )
+        else:
+            self.retryable = retryable
 
 
 class SearchEmptyResultsError(SearchError):
@@ -871,33 +900,135 @@ async def scrape_search_page(
     screenshot_path = f"{scrape_key}.png"
 
     try:
+        # Navigate with bounded retry, exponential backoff, and jitter
         last_nav_err: Exception | None = None
-        for attempt in range(2):
+        last_status: int | None = None
+        status_display: str = "unknown"
+        attempts_made: int = 0
+
+        for attempt in range(1, MAX_NAVIGATION_RETRIES + 1):
+            attempts_made = attempt
             try:
                 response = await page.goto(
                     affiliate_url,
                     timeout=30000,
                     wait_until="domcontentloaded",
                 )
-                if response is not None and getattr(response, "status", 200) >= 400:
-                    raise SearchNavigationError(
-                        f"HTTP {response.status} when loading search page {affiliate_url}"
+                status_code = getattr(response, "status", 200) if response is not None else 200
+                last_status = status_code
+                status_display = f"HTTP_{status_code}"
+
+                if status_code in RETRYABLE_STATUS_CODES:
+                    err_msg = f"HTTP {status_code} when loading search page {affiliate_url}"
+                    if attempt < MAX_NAVIGATION_RETRIES:
+                        backoff = min(
+                            MAX_BACKOFF_SECONDS,
+                            BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)),
+                        ) + random.uniform(0.1, BACKOFF_JITTER_SECONDS)
+                        logger.warning(
+                            "NAVIGATION RETRY [search_handler]:\n"
+                            "  handler=search_handler\n"
+                            "  url=%s\n"
+                            "  attempt=%d/%d\n"
+                            "  status=%s\n"
+                            "  retryable=True\n"
+                            "  backoff=%.2fs",
+                            affiliate_url,
+                            attempt,
+                            MAX_NAVIGATION_RETRIES,
+                            status_display,
+                            backoff,
+                        )
+                        await _nav_sleep(backoff)
+                        continue
+                    else:
+                        last_nav_err = SearchNavigationError(
+                            err_msg,
+                            status_code=status_code,
+                            retryable=True,
+                        )
+                        break
+
+                if 400 <= status_code < 500 and status_code not in RETRYABLE_STATUS_CODES:
+                    # Non-retryable client error (e.g. 404 Not Found)
+                    last_nav_err = SearchNavigationError(
+                        f"HTTP {status_code} when loading search page {affiliate_url}",
+                        status_code=status_code,
+                        retryable=False,
                     )
+                    break
+
+                # Success (2xx / 3xx)
                 last_nav_err = None
+                logger.info(
+                    "NAVIGATION SUCCESS [search_handler]:\n"
+                    "  handler=search_handler\n"
+                    "  url=%s\n"
+                    "  attempt=%d/%d\n"
+                    "  status=%d",
+                    affiliate_url,
+                    attempt,
+                    MAX_NAVIGATION_RETRIES,
+                    status_code,
+                )
                 break
-            except SearchNavigationError:
-                raise
+
+            except SearchNavigationError as s_err:
+                last_nav_err = s_err
+                break
             except Exception as exc:
                 last_nav_err = exc
-                if attempt == 0:
-                    logger.warning("Search page.goto failed (attempt 1), retrying: %s", exc)
+                status_display = type(exc).__name__
+                if attempt < MAX_NAVIGATION_RETRIES:
+                    backoff = min(
+                        MAX_BACKOFF_SECONDS,
+                        BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)),
+                    ) + random.uniform(0.1, BACKOFF_JITTER_SECONDS)
+                    logger.warning(
+                        "NAVIGATION RETRY [search_handler]:\n"
+                        "  handler=search_handler\n"
+                        "  url=%s\n"
+                        "  attempt=%d/%d\n"
+                        "  status=%s\n"
+                        "  retryable=True\n"
+                        "  backoff=%.2fs\n"
+                        "  error=%s",
+                        affiliate_url,
+                        attempt,
+                        MAX_NAVIGATION_RETRIES,
+                        status_display,
+                        backoff,
+                        exc,
+                    )
+                    await _nav_sleep(backoff)
+                    continue
                 else:
-                    raise SearchNavigationError(
-                        f"Navigation failed for search URL {affiliate_url}: {exc}"
-                    ) from exc
+                    break
 
         if last_nav_err is not None:
-            raise SearchNavigationError(f"Navigation failed: {last_nav_err}") from last_nav_err
+            is_retryable = getattr(last_nav_err, "retryable", True)
+            final_reason = str(last_nav_err)
+            logger.error(
+                "NAVIGATION FAILED [search_handler]:\n"
+                "  handler=search_handler\n"
+                "  url=%s\n"
+                "  retry_count=%d\n"
+                "  navigation_status=%s\n"
+                "  retryable=%s\n"
+                "  final_failure_reason=%s",
+                affiliate_url,
+                attempts_made,
+                status_display,
+                is_retryable,
+                final_reason,
+            )
+            if isinstance(last_nav_err, SearchNavigationError):
+                raise last_nav_err
+            raise SearchNavigationError(
+                f"Navigation failed for search URL {affiliate_url}: {last_nav_err}",
+                status_code=last_status,
+                retryable=is_retryable,
+            ) from last_nav_err
 
         await _bypass_continue_shopping_if_present(page)
         await _check_page_unavailable_or_captcha(page)
